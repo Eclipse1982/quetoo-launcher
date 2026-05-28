@@ -1,51 +1,123 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect, useState } from 'react';
+import {
+  chooseInstallDir,
+  getStatus,
+  installOrUpdate,
+  onDownloadProgress,
+  play,
+  setInstallDir,
+} from './api';
+import type { Status } from './types';
+import './styles.css';
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type Phase = 'loading' | 'idle' | 'working' | 'error';
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+export default function App() {
+  const [status, setStatus] = useState<Status | null>(null);
+  const [phase, setPhase] = useState<Phase>('loading');
+  const [message, setMessage] = useState<string>('Checking for updates…');
+  const [percent, setPercent] = useState<number>(0);
+
+  async function refresh() {
+    setPhase('loading');
+    setMessage('Checking for updates…');
+    try {
+      setStatus(await getStatus());
+      setPhase('idle');
+    } catch (e) {
+      setMessage(String(e));
+      setPhase('error');
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    const un = onDownloadProgress((p) => {
+      setPercent(p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0);
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, []);
+
+  async function handleChooseDir() {
+    const dir = await chooseInstallDir();
+    if (!dir) return;
+    await setInstallDir(dir);
+    await refresh();
+  }
+
+  async function handleInstall() {
+    setPhase('working');
+    setPercent(0);
+    setMessage('Downloading…');
+    try {
+      await installOrUpdate();
+      await refresh();
+    } catch (e) {
+      setMessage(String(e));
+      setPhase('error');
+    }
+  }
+
+  async function handlePlay() {
+    try {
+      await play();
+    } catch (e) {
+      setMessage(String(e));
+      setPhase('error');
+    }
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <main className="app">
+      <h1>Quetoo Launcher</h1>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      {phase === 'loading' && <p className="status">{message}</p>}
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      {phase === 'error' && (
+        <>
+          <p className="status error">{message}</p>
+          <button onClick={refresh}>Retry</button>
+        </>
+      )}
+
+      {phase === 'working' && (
+        <>
+          <p className="status">{message}</p>
+          <div className="bar">
+            <div className="bar-fill" style={{ width: `${percent}%` }} />
+          </div>
+          <p className="status">{percent}%</p>
+        </>
+      )}
+
+      {phase === 'idle' && status && (
+        <>
+          <p className="status">
+            Install folder: {status.installDir ?? <em>not set</em>}
+          </p>
+          <button onClick={handleChooseDir}>
+            {status.installDir ? 'Change install folder' : 'Choose install folder'}
+          </button>
+
+          {!status.installDir ? (
+            <p className="status">Choose a folder to install Quetoo.</p>
+          ) : status.state.state === 'notInstalled' ? (
+            <button className="primary" onClick={handleInstall}>
+              Install {status.latestVersion}
+            </button>
+          ) : status.state.state === 'updateAvailable' ? (
+            <button className="primary" onClick={handleInstall}>
+              Update {status.state.from} → {status.state.to}
+            </button>
+          ) : (
+            <button className="primary play" onClick={handlePlay}>
+              Play
+            </button>
+          )}
+        </>
+      )}
     </main>
   );
 }
-
-export default App;
