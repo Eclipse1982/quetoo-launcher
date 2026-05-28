@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ''
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+          - platform: ubuntu-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Quetoo Launcher ${{ github.ref_name }}'
+          releaseBody: 'Automated release.'
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  mirror:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror release assets to public repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          TAG: ${{ github.ref_name }}
+          SRC: Eclipse1982/quetoo-launcher
+          DST: Eclipse1982/quetoo-launcher-releases
+        run: |
+          set -euo pipefail
+          mkdir -p dist && cd dist
+
+          # Download all assets from the private release.
+          gh release download "$TAG" --repo "$SRC" --dir .
+
+          # Rewrite asset URLs in latest.json to point at the public repo.
+          if [ -f latest.json ]; then
+            sed -i "s#$SRC#$DST#g" latest.json
+          fi
+
+          # Create (or recreate) the public release and upload everything.
+          gh release delete "$TAG" --repo "$DST" --yes || true
+          gh release create "$TAG" --repo "$DST" \
+            --title "Quetoo Launcher $TAG" \
+            --notes "Automated release." \
+            ./*
