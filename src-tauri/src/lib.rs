@@ -106,6 +106,26 @@ async fn play(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     launcher::launch(&install_dir)
 }
 
+/// Read the curated Quetoo settings from autoexec.cfg.
+#[tauri::command]
+async fn get_quetoo_settings() -> std::result::Result<qconfig::Settings, error::LauncherError> {
+    qconfig::load_settings()
+}
+
+/// Write the curated Quetoo settings to autoexec.cfg (preserving other lines).
+#[tauri::command]
+async fn save_quetoo_settings(
+    settings: qconfig::Settings,
+) -> std::result::Result<(), error::LauncherError> {
+    qconfig::save_settings(&settings)
+}
+
+/// Return the documented default settings (for the UI's "reset").
+#[tauri::command]
+fn default_quetoo_settings() -> qconfig::Settings {
+    qconfig::Settings::defaults()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -116,7 +136,10 @@ pub fn run() {
             get_status,
             set_install_dir,
             install_or_update,
-            play
+            play,
+            get_quetoo_settings,
+            save_quetoo_settings,
+            default_quetoo_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
