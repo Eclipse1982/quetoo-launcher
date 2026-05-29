@@ -181,7 +181,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
                 continue;
             }
             let key = settings.bindings.get(&command).cloned().unwrap_or_default();
-            out.push(format!("bind {} {}", quote_if_needed(&key), command));
+            out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(&command)));
             written_binds.insert(command);
         } else {
             out.push(line.to_string()); // verbatim
@@ -201,7 +201,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     for (_, command, _) in BINDINGS {
         if !written_binds.contains(*command) {
             let key = settings.bindings.get(*command).cloned().unwrap_or_default();
-            out.push(format!("bind {} {}", quote_if_needed(&key), command));
+            out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(command)));
         }
     }
 
@@ -213,11 +213,11 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
 /// Read settings from autoexec.cfg (defaults if missing).
 pub fn load_settings() -> Result<Settings> {
     let path = autoexec_path()?;
-    if !path.exists() {
-        return Ok(Settings::defaults());
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(parse_settings(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::defaults()),
+        Err(e) => Err(LauncherError::from(e)),
     }
-    let text = std::fs::read_to_string(&path)?;
-    Ok(parse_settings(&text))
 }
 
 /// Write settings to autoexec.cfg, preserving unmanaged lines. Creates dir/file.
@@ -329,5 +329,15 @@ mod tests {
         let s = Settings::defaults();
         let out = render_autoexec("", &s);
         assert!(!out.contains("set name"));
+    }
+
+    #[test]
+    fn render_collapses_duplicate_managed_lines() {
+        let existing = "set cg_fov 90\nset cg_fov 95\n";
+        let mut s = Settings::defaults();
+        s.cvars.insert("cg_fov".into(), "120".into());
+        let out = render_autoexec(existing, &s);
+        assert_eq!(out.matches("set cg_fov").count(), 1);
+        assert!(out.contains("set cg_fov 120"));
     }
 }
