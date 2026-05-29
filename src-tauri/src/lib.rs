@@ -3,6 +3,7 @@ mod error;
 mod github;
 mod installer;
 mod launcher;
+mod qconfig;
 
 use config::Config;
 use error::Result;
