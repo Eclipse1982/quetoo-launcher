@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { DownloadProgress, Status } from './types';
+import type { DownloadProgress, Settings, Status } from './types';
 
 export const getStatus = () => invoke<Status>('get_status');
 export const setInstallDir = (dir: string) => invoke<void>('set_install_dir', { dir });
@@ -18,3 +18,8 @@ export function onDownloadProgress(
 ): Promise<UnlistenFn> {
   return listen<DownloadProgress>('download-progress', (e) => cb(e.payload));
 }
+
+export const getQuetooSettings = () => invoke<Settings>('get_quetoo_settings');
+export const saveQuetooSettings = (settings: Settings) =>
+  invoke<void>('save_quetoo_settings', { settings });
+export const defaultQuetooSettings = () => invoke<Settings>('default_quetoo_settings');
