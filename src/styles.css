@@ -60,3 +60,10 @@ button.play { background: var(--accent); border-color: var(--accent); color: #04
 button.key { min-width: 120px; }
 button.key.capturing { border-color: var(--accent); color: var(--accent); }
 .settings-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+
+.update-banner {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 12px; border-radius: 6px;
+  background: rgba(34, 211, 190, 0.12); border: 1px solid var(--accent);
+  font-size: 0.85rem;
+}
