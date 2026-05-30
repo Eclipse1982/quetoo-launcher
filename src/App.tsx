@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import {
+  checkLauncherUpdate,
   chooseInstallDir,
   getStatus,
   installOrUpdate,
   onDownloadProgress,
   play,
   setInstallDir,
+  type LauncherUpdate,
 } from './api';
 import type { Status } from './types';
+import Settings from './Settings';
 import './styles.css';
 
 type Phase = 'loading' | 'idle' | 'working' | 'error';
@@ -17,6 +20,9 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>('loading');
   const [message, setMessage] = useState<string>('Checking for updates…');
   const [percent, setPercent] = useState<number>(0);
+  const [view, setView] = useState<'launcher' | 'settings'>('launcher');
+  const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdate | null>(null);
+  const [updating, setUpdating] = useState(false);
 
   async function refresh() {
     setPhase('loading');
@@ -32,6 +38,7 @@ export default function App() {
 
   useEffect(() => {
     refresh();
+    checkLauncherUpdate().then(setLauncherUpdate);
     const un = onDownloadProgress((p) => {
       setPercent(p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0);
     });
@@ -69,9 +76,39 @@ export default function App() {
     }
   }
 
+  if (view === 'settings') {
+    return <Settings onBack={() => setView('launcher')} />;
+  }
+
   return (
     <main className="app">
-      <h1>Quetoo Launcher</h1>
+        {launcherUpdate && (
+          <div className="update-banner">
+            <span>Launcher {launcherUpdate.version} available</span>
+            <button
+              className="primary"
+              disabled={updating}
+              onClick={async () => {
+                setUpdating(true);
+                try {
+                  await launcherUpdate.apply();
+                } catch (e) {
+                  setUpdating(false);
+                  setMessage(String(e));
+                  setPhase('error');
+                }
+              }}
+            >
+              {updating ? 'Updating…' : 'Update & restart'}
+            </button>
+          </div>
+        )}
+        <header className="brand">
+          <img src="/quetoo-logo.png" alt="Quetoo" className="logo" />
+          <button className="gear" onClick={() => setView('settings')} title="Settings">
+            ⚙ Settings
+          </button>
+        </header>
 
       {phase === 'loading' && <p className="status">{message}</p>}
 
