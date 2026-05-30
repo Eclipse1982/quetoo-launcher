@@ -42,9 +42,12 @@ export default function Settings({ onBack }: { onBack: () => void }) {
     if (!capturing) return;
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
-      setSettings((s) =>
-        s ? { ...s, bindings: { ...s.bindings, [capturing]: eventToKey(e) } } : s,
-      );
+      // Escape cancels the rebind instead of binding the Escape key.
+      if (e.key !== 'Escape') {
+        setSettings((s) =>
+          s ? { ...s, bindings: { ...s.bindings, [capturing]: eventToKey(e) } } : s,
+        );
+      }
       setCapturing(null);
     };
     const onMouse = (e: MouseEvent) => {

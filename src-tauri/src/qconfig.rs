@@ -121,6 +121,17 @@ pub fn tokenize(line: &str) -> Vec<String> {
     tokens
 }
 
+/// The command portion of a tokenized `bind <key> <command...>` line, ignoring
+/// any trailing inline `// comment` tokens.
+fn bind_command(tokens: &[String]) -> String {
+    tokens[2..]
+        .iter()
+        .take_while(|tok| !tok.starts_with("//"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parse autoexec.cfg text into Settings (defaults for anything not present).
 pub fn parse_settings(text: &str) -> Settings {
     let mut settings = Settings::defaults();
@@ -132,7 +143,7 @@ pub fn parse_settings(text: &str) -> Settings {
         if t.len() >= 3 && t[0] == "set" && managed_cvars.contains(&t[1].as_str()) {
             settings.cvars.insert(t[1].clone(), t[2].clone());
         } else if t.len() >= 3 && t[0] == "bind" {
-            let command = t[2..].join(" ");
+            let command = bind_command(&t);
             if managed_cmds.contains(&command.as_str()) {
                 settings.bindings.insert(command, t[1].clone());
             }
@@ -175,8 +186,8 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
             }
             out.push(format!("set {} {}", name, quote_if_needed(&value)));
             written_cvars.insert(name.clone());
-        } else if t.len() >= 3 && t[0] == "bind" && managed_cmds.contains(&t[2..].join(" ").as_str()) {
-            let command = t[2..].join(" ");
+        } else if t.len() >= 3 && t[0] == "bind" && managed_cmds.contains(&bind_command(&t).as_str()) {
+            let command = bind_command(&t);
             if written_binds.contains(&command) {
                 continue;
             }
@@ -339,5 +350,19 @@ mod tests {
         let out = render_autoexec(existing, &s);
         assert_eq!(out.matches("set cg_fov").count(), 1);
         assert!(out.contains("set cg_fov 120"));
+    }
+
+    #[test]
+    fn bind_with_inline_comment_is_managed_in_place() {
+        // An annotated managed bind should be recognized and updated in place,
+        // not passed through and then duplicated by an appended entry.
+        let existing = "bind w +forward // my note\n";
+        let mut s = Settings::defaults();
+        s.bindings.insert("+forward".into(), "up".into());
+        let out = render_autoexec(existing, &s);
+        assert_eq!(out.matches("+forward").count(), 1);
+        assert!(out.contains("bind up +forward"));
+        // parsing also reads the annotated line
+        assert_eq!(parse_settings(existing).bindings.get("+forward").unwrap(), "w");
     }
 }
