@@ -5,9 +5,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub install_dir: Option<PathBuf>,
+    /// Tag of the official jdolan/quetoo base install currently on disk.
     pub installed_version: Option<String>,
     #[serde(default)]
     pub bundle_installed: bool,
+    /// Tag of the Eclipse1982/quetoo RailWarz overlay applied on top of the base
+    /// install. `None` means no overlay has been applied yet.
+    #[serde(default)]
+    pub railwarz_version: Option<String>,
 }
 
 impl Config {
@@ -53,6 +58,7 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some("v1.0.25".into()),
             bundle_installed: true,
+            railwarz_version: Some("railwarz-v1".into()),
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();

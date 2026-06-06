@@ -7,7 +7,10 @@ mod qconfig;
 
 use config::Config;
 use error::Result;
-use github::{determine_state, fetch_latest_release, select_asset, AssetKind, InstallState};
+use github::{
+    determine_state, fetch_latest_release, fetch_railwarz_release, select_asset, AssetKind,
+    InstallState,
+};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -40,11 +43,14 @@ struct StatusDto {
 #[tauri::command]
 async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::LauncherError> {
     let cfg = Config::load(&config_path(&app)?)?;
-    let release = fetch_latest_release(&http_client()).await?;
-    let state = determine_state(&cfg, &release.tag_name);
+    let client = http_client();
+    let official = fetch_latest_release(&client).await?;
+    let railwarz = fetch_railwarz_release(&client).await?;
+    let state = determine_state(&cfg, &official.tag_name, &railwarz.tag_name);
     Ok(StatusDto {
         install_dir: cfg.install_dir.map(|p| p.to_string_lossy().into_owned()),
-        latest_version: release.tag_name,
+        // Headline the RailWarz overlay version; note the official base it sits on.
+        latest_version: format!("{} (base {})", railwarz.tag_name, official.tag_name),
         state,
     })
 }
@@ -62,7 +68,9 @@ async fn set_install_dir(
     Ok(())
 }
 
-/// Install (bundle) or update (small) Quetoo, then record the new version.
+/// Install/update Quetoo RailWarz: install or update the official base (engine + game
+/// data), then overlay our matched RailWarz engine + game/cgame modules on top.
+/// Each step records its version only on success, so the operation is resumable.
 #[tauri::command]
 async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     let path = config_path(&app)?;
@@ -73,26 +81,43 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
         .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
 
     let client = http_client();
-    let release = fetch_latest_release(&client).await?;
-
-    // Bundle if we've never installed one; otherwise a small update.
-    let kind = if cfg.bundle_installed {
-        AssetKind::Update
-    } else {
-        AssetKind::Bundle
-    };
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let asset = select_asset(&release, os, arch, kind)?.clone();
 
-    installer::download_and_install(&app, &client, &asset, &install_dir).await?;
+    let official = fetch_latest_release(&client).await?;
+    let railwarz = fetch_railwarz_release(&client).await?;
 
-    // Commit version only on success.
-    if kind == AssetKind::Bundle {
-        cfg.bundle_installed = true;
+    // 1) Base — official Quetoo. Bundle (engine + game data) on first install, else a
+    //    small update when upstream has moved. An official update overwrites our overlaid
+    //    modules, so it forces a re-overlay (railwarz_version cleared) below.
+    let base_changed = !cfg.bundle_installed
+        || cfg.installed_version.as_deref() != Some(official.tag_name.as_str());
+    if base_changed {
+        let kind = if cfg.bundle_installed {
+            AssetKind::Update
+        } else {
+            AssetKind::Bundle
+        };
+        let asset = select_asset(&official, os, arch, kind)?.clone();
+        installer::download_and_install(&app, &client, &asset, &install_dir).await?;
+        if kind == AssetKind::Bundle {
+            cfg.bundle_installed = true;
+        }
+        cfg.installed_version = Some(official.tag_name.clone());
+        cfg.railwarz_version = None; // a fresh base wipes any prior overlay
+        cfg.save(&path)?;
     }
-    cfg.installed_version = Some(release.tag_name);
-    cfg.save(&path)?;
+
+    // 2) Overlay — RailWarz binaries only (engine + game.dll/cgame.dll); game data comes
+    //    from the base. Extracts over the install dir so the matched build wins.
+    let overlay_changed = cfg.railwarz_version.as_deref() != Some(railwarz.tag_name.as_str());
+    if overlay_changed {
+        let asset = select_asset(&railwarz, os, arch, AssetKind::Update)?.clone();
+        installer::download_and_install(&app, &client, &asset, &install_dir).await?;
+        cfg.railwarz_version = Some(railwarz.tag_name.clone());
+        cfg.save(&path)?;
+    }
+
     Ok(())
 }
 
