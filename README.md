@@ -1,15 +1,10 @@
 # Quetoo Launcher
 
 A small cross-platform desktop launcher that installs, updates, and launches
-**Quetoo RailWarz** — the [Quetoo](https://github.com/jdolan/quetoo) engine with the
-[Eclipse1982/quetoo](https://github.com/Eclipse1982/quetoo) RailWarz mod (Q2/TMG FFA parity).
+[Quetoo](https://github.com/jdolan/quetoo) from its official GitHub releases.
 
-- Auto-checks the latest official **and** RailWarz releases on open.
-- Install is two layers: the official Quetoo **base** (engine + game data), then the
-  matched **RailWarz overlay** (our engine + `game`/`cgame` modules) on top — so the
-  client predicts movement identically to the RailWarz servers.
-- First run downloads the full base bundle; later runs apply small base updates and/or
-  re-apply the overlay when either source moves.
+- Auto-checks the latest Quetoo release on open.
+- First run downloads the full bundle; later runs apply small updates.
 - One-click **Play**.
 - Self-updating (Tauri updater) — download the latest launcher from the
   [releases page](https://github.com/Eclipse1982/quetoo-launcher-releases/releases/latest).
