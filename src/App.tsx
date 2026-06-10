@@ -2,24 +2,35 @@ import { useEffect, useState } from 'react';
 import {
   checkLauncherUpdate,
   chooseInstallDir,
+  confirmDialog,
   getStatus,
   installOrUpdate,
-  onDownloadProgress,
+  onInstallProgress,
   play,
+  reinstall,
+  rollbackUpdate,
   setInstallDir,
   type LauncherUpdate,
 } from './api';
-import type { Status } from './types';
+import type { InstallPhase, Status } from './types';
 import Settings from './Settings';
 import './styles.css';
 
 type Phase = 'loading' | 'idle' | 'working' | 'error';
+
+const PHASE_LABELS: Record<InstallPhase, string> = {
+  download: 'Downloading',
+  snapshot: 'Backing up current version',
+  extract: 'Installing files',
+  verify: 'Verifying',
+};
 
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [phase, setPhase] = useState<Phase>('loading');
   const [message, setMessage] = useState<string>('Checking for updates…');
   const [percent, setPercent] = useState<number>(0);
+  const [detail, setDetail] = useState<string>('');
   const [view, setView] = useState<'launcher' | 'settings'>('launcher');
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -39,13 +50,29 @@ export default function App() {
   useEffect(() => {
     refresh();
     checkLauncherUpdate().then(setLauncherUpdate);
-    const un = onDownloadProgress((p) => {
-      setPercent(p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0);
+    const un = onInstallProgress((p) => {
+      setMessage(PHASE_LABELS[p.phase] ?? p.phase);
+      setPercent(p.percent);
+      setDetail(p.detail);
     });
     return () => {
       un.then((fn) => fn());
     };
   }, []);
+
+  async function run(op: () => Promise<void>, startMessage: string) {
+    setPhase('working');
+    setPercent(0);
+    setDetail('');
+    setMessage(startMessage);
+    try {
+      await op();
+      await refresh();
+    } catch (e) {
+      setMessage(String(e));
+      setPhase('error');
+    }
+  }
 
   async function handleChooseDir() {
     const dir = await chooseInstallDir();
@@ -55,16 +82,35 @@ export default function App() {
   }
 
   async function handleInstall() {
-    setPhase('working');
-    setPercent(0);
-    setMessage('Downloading…');
-    try {
-      await installOrUpdate();
-      await refresh();
-    } catch (e) {
-      setMessage(String(e));
-      setPhase('error');
+    if (!status) return;
+    if (!status.installDir) {
+      if (!status.defaultInstallDir) {
+        setMessage('No default install folder for this platform; choose one.');
+        setPhase('error');
+        return;
+      }
+      await setInstallDir(status.defaultInstallDir);
     }
+    await run(installOrUpdate, 'Starting…');
+  }
+
+  async function handleReinstall() {
+    if (!status?.installDir) return;
+    const ok = await confirmDialog(
+      `This deletes everything in ${status.installDir} and re-downloads the full game (~1 GB). Continue?`,
+      'Reinstall Quetoo',
+    );
+    if (!ok) return;
+    await run(reinstall, 'Reinstalling…');
+  }
+
+  async function handleRollback() {
+    const ok = await confirmDialog(
+      'Restore the previous version from the local backup?',
+      'Roll back update',
+    );
+    if (!ok) return;
+    await run(rollbackUpdate, 'Rolling back…');
   }
 
   async function handlePlay() {
@@ -79,6 +125,9 @@ export default function App() {
   if (view === 'settings') {
     return <Settings onBack={() => setView('launcher')} />;
   }
+
+  const installed =
+    status?.state.state === 'upToDate' || status?.state.state === 'updateAvailable';
 
   return (
     <main className="app">
@@ -125,22 +174,28 @@ export default function App() {
           <div className="bar">
             <div className="bar-fill" style={{ width: `${percent}%` }} />
           </div>
-          <p className="status">{percent}%</p>
+          <p className="status">
+            {percent}%{detail ? ` — ${detail}` : ''}
+          </p>
         </>
       )}
 
       {phase === 'idle' && status && (
         <>
           <p className="status">
-            Install folder: {status.installDir ?? <em>not set</em>}
+            Install folder:{' '}
+            {status.installDir ??
+              (status.defaultInstallDir ? (
+                <em>{status.defaultInstallDir} (default)</em>
+              ) : (
+                <em>not set</em>
+              ))}
           </p>
           <button onClick={handleChooseDir}>
-            {status.installDir ? 'Change install folder' : 'Choose install folder'}
+            {status.installDir ? 'Change install folder' : 'Choose a different folder'}
           </button>
 
-          {!status.installDir ? (
-            <p className="status">Choose a folder to install Quetoo.</p>
-          ) : status.state.state === 'notInstalled' ? (
+          {status.state.state === 'notInstalled' ? (
             <button className="primary" onClick={handleInstall}>
               Install {status.latestVersion}
             </button>
@@ -152,6 +207,15 @@ export default function App() {
             <button className="primary play" onClick={handlePlay}>
               Play
             </button>
+          )}
+
+          {installed && (
+            <div className="btn-row">
+              {status.canRollback && (
+                <button onClick={handleRollback}>↩ Roll back update</button>
+              )}
+              <button onClick={handleReinstall}>Reinstall</button>
+            </div>
           )}
         </>
       )}

@@ -1,9 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import { ask, open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
-import type { DownloadProgress, Settings, Status } from './types';
+import type { InstallProgress, Settings, Status } from './types';
 
 export const getStatus = () => invoke<Status>('get_status');
 export const setInstallDir = (dir: string) => invoke<void>('set_install_dir', { dir });
@@ -15,11 +15,18 @@ export async function chooseInstallDir(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
-export function onDownloadProgress(
-  cb: (p: DownloadProgress) => void,
+export const rollbackUpdate = () => invoke<void>('rollback_update');
+export const reinstall = () => invoke<void>('reinstall');
+
+export function onInstallProgress(
+  cb: (p: InstallProgress) => void,
 ): Promise<UnlistenFn> {
-  return listen<DownloadProgress>('download-progress', (e) => cb(e.payload));
+  return listen<InstallProgress>('install-progress', (e) => cb(e.payload));
 }
+
+/** Native confirmation dialog; returns true if the user accepted. */
+export const confirmDialog = (message: string, title: string) =>
+  ask(message, { title, kind: 'warning' });
 
 export const getQuetooSettings = () => invoke<Settings>('get_quetoo_settings');
 export const saveQuetooSettings = (settings: Settings) =>

@@ -5,13 +5,18 @@ export type InstallState =
 
 export interface Status {
   installDir: string | null;
+  defaultInstallDir: string | null;
   latestVersion: string;
   state: InstallState;
+  canRollback: boolean;
 }
 
-export interface DownloadProgress {
-  downloaded: number;
-  total: number;
+export type InstallPhase = 'download' | 'snapshot' | 'extract' | 'verify';
+
+export interface InstallProgress {
+  phase: InstallPhase;
+  percent: number;
+  detail: string;
 }
 
 export interface Settings {

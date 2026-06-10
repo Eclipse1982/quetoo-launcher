@@ -67,3 +67,9 @@ button.key.capturing { border-color: var(--accent); color: var(--accent); }
   background: rgba(34, 211, 190, 0.12); border: 1px solid var(--accent);
   font-size: 0.85rem;
 }
+
+.btn-row {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+}
