@@ -18,6 +18,14 @@ pub fn emit_progress(app: &AppHandle, phase: &'static str, percent: u8, detail: 
     let _ = app.emit("install-progress", InstallProgress { phase, percent, detail });
 }
 
+/// Integer percent clamped to 100 (guards lying servers / stale sizes).
+pub fn percent(done: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    ((done as u128 * 100 / total as u128).min(100)) as u8
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
     Zip,
@@ -55,6 +63,7 @@ pub async fn download_asset(
     }
     let total = resp.content_length().unwrap_or(asset.size);
     let mut downloaded: u64 = 0;
+    let mut last_emitted: Option<u8> = None;
     let mut file = std::fs::File::create(dest)?;
     let mut stream = resp.bytes_stream();
     use std::io::Write;
@@ -62,18 +71,29 @@ pub async fn download_asset(
         let chunk = chunk.map_err(|e| LauncherError::Network(e.to_string()))?;
         file.write_all(&chunk)?;
         downloaded += chunk.len() as u64;
-        let percent = if total > 0 { (downloaded * 100 / total) as u8 } else { 0 };
-        emit_progress(
-            app,
-            "download",
-            percent,
-            format!(
-                "{:.1} MB / {:.1} MB",
-                downloaded as f64 / 1_048_576.0,
-                total as f64 / 1_048_576.0
-            ),
-        );
+        let p = percent(downloaded, total);
+        if last_emitted != Some(p) {
+            emit_progress(
+                app,
+                "download",
+                p,
+                format!(
+                    "{:.1} MB / {:.1} MB",
+                    downloaded as f64 / 1_048_576.0,
+                    total as f64 / 1_048_576.0
+                ),
+            );
+            last_emitted = Some(p);
+        }
     }
+    // Always emit final 100% so the bar completes even if the last chunk didn't bump the percent.
+    let final_mb = downloaded as f64 / 1_048_576.0;
+    emit_progress(
+        app,
+        "download",
+        100,
+        format!("{:.1} MB / {:.1} MB", final_mb, final_mb),
+    );
     file.flush()?;
     Ok(())
 }
@@ -110,8 +130,14 @@ pub fn list_entries(archive: &Path, format: ArchiveFormat) -> Result<Vec<String>
                 if entry.header().entry_type().is_dir() {
                     continue;
                 }
-                let path = entry.path().map_err(|e| LauncherError::Extract(e.to_string()))?;
-                out.push(path.to_string_lossy().replace('\\', "/"));
+                let p = entry.path().map_err(|e| LauncherError::Extract(e.to_string()))?;
+                if p.is_absolute()
+                    || p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    continue;
+                }
+                out.push(p.to_string_lossy().replace('\\', "/"));
             }
             Ok(out)
         }
@@ -150,17 +176,25 @@ fn extract_zip(archive: &Path, dest: &Path, progress: &mut dyn FnMut(usize, usiz
         let mut entry = zip
             .by_index(i)
             .map_err(|e| LauncherError::Extract(e.to_string()))?;
-        let Some(rel) = entry.enclosed_name() else { continue };
-        let out = dest.join(&rel);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out)?;
-        } else {
-            if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent)?;
+        if let Some(rel) = entry.enclosed_name() {
+            let out = dest.join(&rel);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out)?;
+            } else {
+                if let Some(parent) = out.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut f = std::fs::File::create(&out)?;
+                std::io::copy(&mut entry, &mut f)?;
+                #[cfg(unix)]
+                if let Some(mode) = entry.unix_mode() {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
+                }
             }
-            let mut f = std::fs::File::create(&out)?;
-            std::io::copy(&mut entry, &mut f)?;
         }
+        // Always report progress for every entry (including skipped non-enclosed-name entries)
+        // so the progress bar advances uniformly.
         progress(i + 1, total);
     }
     Ok(())
@@ -171,6 +205,9 @@ fn extract_targz(
     dest: &Path,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<()> {
+    // Signal activity before the count pass so the caller can show a spinner.
+    progress(0, 0);
+
     // First pass: count entries so progress has a denominator.
     let total = {
         let file = std::fs::File::open(archive)?;
@@ -245,6 +282,27 @@ mod tests {
         assert!(detect_format("quetoo.rpm").is_err());
     }
 
+    // --- Fix 3: percent() unit tests ---
+
+    #[test]
+    fn percent_zero_total_returns_zero() {
+        assert_eq!(percent(0, 0), 0);
+        assert_eq!(percent(100, 0), 0);
+    }
+
+    #[test]
+    fn percent_normal() {
+        assert_eq!(percent(50, 100), 50);
+        assert_eq!(percent(1, 4), 25);
+        assert_eq!(percent(100, 100), 100);
+    }
+
+    #[test]
+    fn percent_done_exceeds_total_clamps_to_100() {
+        assert_eq!(percent(200, 100), 100);
+        assert_eq!(percent(u64::MAX, 1), 100);
+    }
+
     use std::io::Write as _;
 
     /// Build a small zip with bin/quetoo.exe and lib/game.dll inside `dir`.
@@ -317,5 +375,83 @@ mod tests {
         let dest = dir.path().join("install");
         extract_archive(&archive, ArchiveFormat::TarGz, &dest, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(dest.join("bin/quetoo")).unwrap(), b"new-bin");
+    }
+
+    // --- Fix 6a: targz progress callback assertions ---
+
+    #[test]
+    fn extract_targz_progress_callback_last_call_is_done_eq_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_test_targz(dir.path());
+        let dest = dir.path().join("install");
+        let mut calls: Vec<(usize, usize)> = vec![];
+        extract_archive(&archive, ArchiveFormat::TarGz, &dest, &mut |d, t| {
+            calls.push((d, t))
+        })
+        .unwrap();
+        // The preamble progress(0,0) is the first call; filter it out and check the last real call.
+        let real_calls: Vec<_> = calls.iter().filter(|&&(_, t)| t > 0).collect();
+        assert!(!real_calls.is_empty(), "expected progress calls with total > 0");
+        let &(done, total) = real_calls.last().unwrap();
+        assert_eq!(done, total, "last progress call must have done == total");
+        assert!(*total > 0, "total must be positive");
+    }
+
+    // --- Fix 6b: zip-slip tests ---
+
+    /// The zip crate's `start_file` rejects names starting with ".." at the API
+    /// level (it would produce an invalid archive), so we cannot build a classic
+    /// "../evil.txt" zip-slip archive via the normal writer API.
+    ///
+    /// Instead we test with an absolute-path entry name.  The zip crate does
+    /// accept absolute paths in `start_file` (the path is stored verbatim), so
+    /// we can verify that `list_entries` silently skips it (enclosed_name returns
+    /// None for absolute paths) and that `extract_archive` also skips it and
+    /// still reports done == total at the end.
+    fn make_absolute_path_zip(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("slip.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        // A normal safe entry.
+        zip.start_file("safe.txt", opts).unwrap();
+        zip.write_all(b"safe content").unwrap();
+        // An entry whose stored name is an absolute path.
+        // enclosed_name() returns None for these, so both list and extract skip it.
+        zip.start_file("/etc/passwd", opts).unwrap();
+        zip.write_all(b"evil").unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn list_entries_zip_skips_absolute_path_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_absolute_path_zip(dir.path());
+        let entries = list_entries(&archive, ArchiveFormat::Zip).unwrap();
+        // Only safe.txt should appear; the absolute-path entry is silently skipped.
+        assert_eq!(entries, vec!["safe.txt".to_string()]);
+    }
+
+    #[test]
+    fn extract_zip_skips_absolute_path_entry_and_progress_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_absolute_path_zip(dir.path());
+        let dest = dir.path().join("install");
+        let mut calls: Vec<(usize, usize)> = vec![];
+        extract_archive(&archive, ArchiveFormat::Zip, &dest, &mut |d, t| {
+            calls.push((d, t))
+        })
+        .unwrap();
+        // Nothing written outside dest.
+        assert!(!std::path::Path::new("/etc/passwd").exists() ||
+            std::fs::read("/etc/passwd").map(|b| b != b"evil").unwrap_or(true),
+            "zip-slip: evil file must not be written");
+        // safe.txt written inside dest.
+        assert_eq!(std::fs::read(dest.join("safe.txt")).unwrap(), b"safe content");
+        // Progress bar completes: last call has done == total.
+        assert!(!calls.is_empty());
+        let (done, total) = *calls.last().unwrap();
+        assert_eq!(done, total, "progress bar must complete even when entries are skipped");
     }
 }

@@ -96,8 +96,13 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     let format = installer::detect_format(&asset.name)?;
     let app2 = app.clone();
     let extract_result = installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
-        let percent = if total > 0 { (done * 100 / total) as u8 } else { 0 };
-        installer::emit_progress(&app2, "extract", percent, format!("{done}/{total} files"));
+        let percent = installer::percent(done as u64, total as u64);
+        let detail = if total == 0 {
+            "Preparing\u{2026}".to_string()
+        } else {
+            format!("{done}/{total} files")
+        };
+        installer::emit_progress(&app2, "extract", percent, detail);
     });
     let _ = std::fs::remove_file(&tmp);
     extract_result?;
