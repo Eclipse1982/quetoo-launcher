@@ -350,25 +350,29 @@ async fn get_servers(app: AppHandle) -> std::result::Result<ServerList, error::L
         .filter_map(|s| s.parse::<SocketAddrV4>().ok())
         .collect();
 
-    // Fetch the master list concurrently with building the favorites set.
-    let master_result = browser::fetch_master_list().await;
-    let (master_addrs, master_ok) = match master_result {
+    // Probe favorites immediately — they must not wait out a dead master's
+    // 1500ms timeout (that's the exact case master_ok exists for).
+    let mut handles: Vec<_> = favorite_addrs
+        .iter()
+        .copied()
+        .map(|addr| tokio::spawn(async move { browser::probe_server(addr, true).await }))
+        .collect();
+
+    let (master_addrs, master_ok) = match browser::fetch_master_list().await {
         Ok(list) => (list, true),
         Err(_) => (Vec::new(), false),
     };
 
-    // Dedupe master ∪ favorites by SocketAddrV4.
-    let mut all_addrs: HashSet<SocketAddrV4> = master_addrs.into_iter().collect();
-    all_addrs.extend(favorite_addrs.iter().copied());
-
-    // Probe all addresses concurrently using tokio tasks.
-    let handles: Vec<_> = all_addrs
+    // Probe master-only addresses (favorites already in flight = dedupe).
+    let master_only: HashSet<SocketAddrV4> = master_addrs
         .into_iter()
-        .map(|addr| {
-            let is_favorite = favorite_addrs.contains(&addr);
-            tokio::spawn(async move { browser::probe_server(addr, is_favorite).await })
-        })
+        .filter(|a| !favorite_addrs.contains(a))
         .collect();
+    handles.extend(
+        master_only
+            .into_iter()
+            .map(|addr| tokio::spawn(async move { browser::probe_server(addr, false).await })),
+    );
 
     let mut servers: Vec<browser::ServerInfo> = Vec::new();
     for handle in handles {
@@ -380,8 +384,9 @@ async fn get_servers(app: AppHandle) -> std::result::Result<ServerList, error::L
         }
     }
 
-    // Sort by ping ascending (frontend re-sorts, but pre-sort aids initial render).
-    servers.sort_by_key(|s| s.ping);
+    // Ping ascending with a stable addr tiebreak so equal-ping rows (e.g. two
+    // dead favorites at 999) don't swap places on every auto-refresh.
+    servers.sort_by(|a, b| a.ping.cmp(&b.ping).then_with(|| a.addr.cmp(&b.addr)));
 
     Ok(ServerList { servers, master_ok })
 }
