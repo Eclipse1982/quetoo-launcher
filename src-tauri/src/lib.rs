@@ -75,7 +75,7 @@ async fn set_install_dir(
 
 /// Pre-flight guard: on non-macOS, check that the game executable is not
 /// currently held open (which would cause cryptic os error 32 mid-extract).
-/// Returns `Launch` error if the game appears to be running.
+/// Returns `Busy` error if the game appears to be running.
 fn ensure_game_not_running(install_dir: &std::path::Path, os: &str) -> Result<()> {
     if os == "macos" {
         return Ok(());

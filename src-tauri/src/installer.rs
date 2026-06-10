@@ -46,7 +46,7 @@ pub fn detect_format(file_name: &str) -> Result<ArchiveFormat> {
 }
 
 /// True if wiping `dir` cannot destroy user data: missing, effectively empty
-/// (only launcher-owned artifacts: dot-prefixed download temps and `.rollback`),
+/// (only launcher-owned artifacts: `.rollback` and `.quetoo-*` download temps),
 /// or a Quetoo layout (has `bin/` or `Quetoo.app`). Protects against a
 /// mis-pointed install dir being wiped by Reinstall.
 pub fn is_safe_reinstall_target(dir: &std::path::Path) -> crate::error::Result<bool> {
@@ -57,9 +57,12 @@ pub fn is_safe_reinstall_target(dir: &std::path::Path) -> crate::error::Result<b
     for entry in std::fs::read_dir(dir)? {
         let name = entry?.file_name();
         let s = name.to_string_lossy();
-        // Dot-prefixed entries are launcher-owned: download temps (.quetoo-*.zip,
-        // .quetoo-*.tar.gz, etc.) and the rollback directory (.rollback).
-        if !s.starts_with('.') {
+        // Only artifacts the launcher itself creates count as ignorable:
+        // the rollback directory (.rollback) and download temps (.quetoo-*).
+        // Other dot entries (.git, .vscode, ...) are user data — refuse.
+        let launcher_owned =
+            s.eq_ignore_ascii_case(".rollback") || s.to_ascii_lowercase().starts_with(".quetoo");
+        if !launcher_owned {
             has_other = true;
         }
     }
@@ -386,6 +389,17 @@ mod tests {
         assert!(
             is_safe_reinstall_target(dir.path()).unwrap(),
             "dir with only launcher-owned dot-prefixed entries must be safe"
+        );
+    }
+
+    /// Non-launcher dot entries are user data: a .git-only dir must be refused.
+    #[test]
+    fn dot_git_only_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        assert!(
+            !is_safe_reinstall_target(dir.path()).unwrap(),
+            "a dir whose only entry is .git must not be wiped"
         );
     }
 
