@@ -32,16 +32,22 @@ impl Config {
     }
 }
 
+/// Pure path builder for the platform default install directory.
+/// `env` returns the value of an environment variable, if set.
+fn default_install_dir_from_env(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    match os {
+        "windows" => Some(PathBuf::from(r"C:\Games\Quetoo")),
+        "linux" => env("HOME")
+            .map(|h| PathBuf::from(h).join(".local").join("share").join("quetoo")),
+        "macos" => env("HOME").map(|h| PathBuf::from(h).join("Applications")),
+        _ => None,
+    }
+}
+
 /// Platform default install directory, offered when no install_dir is configured.
 /// The user can always pick a different folder; this is only the pre-filled value.
 pub fn default_install_dir(os: &str) -> Option<PathBuf> {
-    match os {
-        "windows" => Some(PathBuf::from(r"C:\Games\Quetoo")),
-        "linux" => std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".local").join("share").join("quetoo")),
-        "macos" => std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications")),
-        _ => None,
-    }
+    default_install_dir_from_env(os, &|k| std::env::var(k).ok())
 }
 
 #[cfg(test)]
@@ -82,5 +88,51 @@ mod tests {
     #[test]
     fn default_install_dir_unsupported_is_none() {
         assert!(default_install_dir("freebsd").is_none());
+    }
+
+    #[test]
+    fn default_install_dir_linux_from_home() {
+        let env = |k: &str| (k == "HOME").then(|| "/home/j".to_string());
+        assert_eq!(
+            default_install_dir_from_env("linux", &env).unwrap(),
+            PathBuf::from("/home/j").join(".local").join("share").join("quetoo")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_macos_from_home() {
+        let env = |k: &str| (k == "HOME").then(|| "/Users/j".to_string());
+        assert_eq!(
+            default_install_dir_from_env("macos", &env).unwrap(),
+            PathBuf::from("/Users/j").join("Applications")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_linux_no_home_is_none() {
+        let env = |_k: &str| None;
+        assert!(default_install_dir_from_env("linux", &env).is_none());
+    }
+
+    #[test]
+    fn default_install_dir_macos_no_home_is_none() {
+        let env = |_k: &str| None;
+        assert!(default_install_dir_from_env("macos", &env).is_none());
+    }
+
+    #[test]
+    fn default_install_dir_windows_ignores_env() {
+        // Windows branch is a constant — env is never consulted.
+        let env = |_k: &str| None;
+        assert_eq!(
+            default_install_dir_from_env("windows", &env).unwrap(),
+            PathBuf::from(r"C:\Games\Quetoo")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_freebsd_is_none_from_env() {
+        let env = |_k: &str| None;
+        assert!(default_install_dir_from_env("freebsd", &env).is_none());
     }
 }
