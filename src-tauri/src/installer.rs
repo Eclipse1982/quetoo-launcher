@@ -115,6 +115,14 @@ pub fn list_entries(archive: &Path, format: ArchiveFormat) -> Result<Vec<String>
                     continue;
                 }
                 if let Some(name) = entry.enclosed_name() {
+                    // Archives must not write into the launcher's rollback area.
+                    let first_component = name.components().next();
+                    if matches!(
+                        first_component,
+                        Some(std::path::Component::Normal(s)) if s == ".rollback"
+                    ) {
+                        continue;
+                    }
                     out.push(name.to_string_lossy().replace('\\', "/"));
                 }
             }
@@ -135,6 +143,13 @@ pub fn list_entries(archive: &Path, format: ArchiveFormat) -> Result<Vec<String>
                     || p.components()
                         .any(|c| matches!(c, std::path::Component::ParentDir))
                 {
+                    continue;
+                }
+                // Archives must not write into the launcher's rollback area.
+                if matches!(
+                    p.components().next(),
+                    Some(std::path::Component::Normal(s)) if s == ".rollback"
+                ) {
                     continue;
                 }
                 out.push(p.to_string_lossy().replace('\\', "/"));
@@ -453,5 +468,33 @@ mod tests {
         assert!(!calls.is_empty());
         let (done, total) = *calls.last().unwrap();
         assert_eq!(done, total, "progress bar must complete even when entries are skipped");
+    }
+
+    // --- Fix 2: .rollback filtering in list_entries ---
+
+    /// Build a zip that contains a `.rollback/evil.txt` entry.
+    fn make_rollback_zip(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("rollback.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        zip.start_file("safe.txt", opts).unwrap();
+        zip.write_all(b"safe").unwrap();
+        // .rollback entry: zip crate accepts this name verbatim.
+        zip.start_file(".rollback/evil.txt", opts).unwrap();
+        zip.write_all(b"evil").unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    /// list_entries must skip entries whose first path component is `.rollback`,
+    /// so archives cannot overwrite the launcher's rollback area.
+    #[test]
+    fn list_entries_zip_skips_rollback_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_rollback_zip(dir.path());
+        let entries = list_entries(&archive, ArchiveFormat::Zip).unwrap();
+        // Only safe.txt should appear; .rollback/evil.txt must be skipped.
+        assert_eq!(entries, vec!["safe.txt".to_string()]);
     }
 }
