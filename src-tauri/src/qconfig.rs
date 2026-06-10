@@ -43,26 +43,59 @@ pub fn autoexec_path() -> Result<PathBuf> {
 
 /// (cvar name, default value) for the curated cvar fields, in display order.
 pub const CVARS: &[(&str, &str)] = &[
-    ("name", ""),
-    ("cg_fov", "110"),
-    ("m_sensitivity", "3.0"),
-    ("cg_draw_crosshair", "1"),
-    ("cg_draw_crosshair_scale", "1"),
-    ("cg_draw_crosshair_color", "default"),
-    ("cg_draw_weapon", "1"),
-    ("s_volume", "1"),
+    // Video
+    ("r_fullscreen", "1"), ("r_fullscreen_width", "0"), ("r_fullscreen_height", "0"),
+    ("r_window_width", "1920"), ("r_window_height", "1080"), ("r_swap_interval", "1"),
+    ("cl_max_fps", "-1"), ("r_draw_scale", "1"), ("r_anisotropy", "16"),
+    ("r_antialias", "0"), ("r_modulate", "1"), ("r_saturation", "1"),
+    ("r_bloom", "4"), ("r_shadows", "1"),
+    // Audio
+    ("s_volume", "1"), ("s_effects_volume", "1"), ("s_music_volume", "0.5"),
+    ("s_ambient_volume", "1"), ("s_hrtf", "0"), ("cg_hit_sound", "1"),
+    // Mouse
+    ("m_sensitivity", "3.0"), ("m_sensitivity_zoom", "1.0"), ("m_invert", "0"),
+    ("m_interpolate", "0"), ("cg_run", "1"),
+    // Player
+    ("name", ""), ("skin", "qforcer/default"), ("hand", "1"),
+    ("auto_switch", "1"), ("hook_style", "pull"),
+    // View & HUD
+    ("cg_fov", "110"), ("cg_fov_zoom", "55"), ("cg_draw_hud", "1"),
+    ("cg_draw_weapon", "1"), ("cg_draw_weapon_bob", "1"), ("cg_bob", "1"),
+    ("cg_draw_blend_damage", "1"), ("cl_draw_counters", "1"),
+    ("cl_draw_net_graph", "1"), ("cg_third_person_chasecam", "0"),
+    // Crosshair
+    ("cg_draw_crosshair", "1"), ("cg_draw_crosshair_scale", "1"),
+    ("cg_draw_crosshair_color", "default"), ("cg_draw_crosshair_alpha", "1.0"),
+    ("cg_draw_crosshair_health", "0"), ("cg_draw_crosshair_pulse", "1"),
 ];
 
 /// (action label, bind command, default key) for curated bindings, in display order.
 pub const BINDINGS: &[(&str, &str, &str)] = &[
-    ("Move forward", "+forward", "w"),
-    ("Move back", "+back", "s"),
-    ("Move left", "+move_left", "a"),
-    ("Move right", "+move_right", "d"),
-    ("Jump", "+move_up", "space"),
-    ("Attack", "+attack", "mouse 1"),
-    ("Run/Walk", "+speed", "left shift"),
-    ("Hook", "+hook", "mouse 2"),
+    // Movement
+    ("Move forward", "+forward", "w"), ("Move back", "+back", "s"),
+    ("Move left", "+move_left", "a"), ("Move right", "+move_right", "d"),
+    ("Jump", "+move_up", "space"), ("Crouch", "+move_down", "c"),
+    ("Run/Walk", "+speed", "left shift"), ("Center view", "center_view", "home"),
+    // Combat
+    ("Attack", "+attack", "mouse 1"), ("Hook", "+hook", "mouse 2"),
+    ("Zoom", "+ZOOM", "left alt"),
+    ("Next weapon", "cg_weapon_next", "mouse wheel down"),
+    ("Previous weapon", "cg_weapon_previous", "mouse wheel up"),
+    ("Last weapon", "weapon_last", ""), ("Show score", "+score", "tab"),
+    ("Kill/respawn", "kill", ""),
+    // Weapons
+    ("Blaster", "use blaster", "1"), ("Shotgun", "use shotgun", "2"),
+    ("Super shotgun", "use super shotgun", "3"), ("Machinegun", "use machinegun", "4"),
+    ("Hand grenades", "use hand grenades", "g"),
+    ("Grenade launcher", "use grenade launcher", "5"),
+    ("Rocket launcher", "use rocket launcher", "6"),
+    ("Hyperblaster", "use hyperblaster", "7"),
+    ("Lightning gun", "use lightning gun", "8"), ("Railgun", "use railgun", "9"),
+    ("BFG10K", "use bfg10k", "0"),
+    // Communication
+    ("Chat", "cl_message_mode", "t"), ("Team chat", "cl_message_mode_2", "y"),
+    // Misc
+    ("Screenshot", "r_screenshot", "f12"), ("Toggle console", "cl_toggle_console", "`"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +225,10 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
                 continue;
             }
             let key = settings.bindings.get(&command).cloned().unwrap_or_default();
+            if key.is_empty() {
+                written_binds.insert(command);
+                continue;
+            }
             out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(&command)));
             written_binds.insert(command);
         } else {
@@ -212,6 +249,9 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     for (_, command, _) in BINDINGS {
         if !written_binds.contains(*command) {
             let key = settings.bindings.get(*command).cloned().unwrap_or_default();
+            if key.is_empty() {
+                continue;
+            }
             out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(command)));
         }
     }
@@ -348,7 +388,11 @@ mod tests {
         let mut s = Settings::defaults();
         s.cvars.insert("cg_fov".into(), "120".into());
         let out = render_autoexec(existing, &s);
-        assert_eq!(out.matches("set cg_fov").count(), 1);
+        // Count only exact "set cg_fov <value>" lines, not cg_fov_zoom etc.
+        let fov_count = out.lines()
+            .filter(|l| l.starts_with("set cg_fov ") && !l.starts_with("set cg_fov_"))
+            .count();
+        assert_eq!(fov_count, 1);
         assert!(out.contains("set cg_fov 120"));
     }
 
@@ -364,5 +408,58 @@ mod tests {
         assert!(out.contains("bind up +forward"));
         // parsing also reads the annotated line
         assert_eq!(parse_settings(existing).bindings.get("+forward").unwrap(), "w");
+    }
+
+    #[test]
+    fn multiword_bind_command_round_trips() {
+        let s = {
+            let mut s = Settings::defaults();
+            s.bindings.insert("use railgun".into(), "9".into());
+            s
+        };
+        let text = render_autoexec("", &s);
+        assert!(text.contains("bind 9 \"use railgun\""), "got: {text}");
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.bindings.get("use railgun"), Some(&"9".to_string()));
+    }
+
+    #[test]
+    fn empty_key_bind_is_not_written() {
+        let mut s = Settings::defaults();
+        s.bindings.insert("kill".into(), "".into());
+        let text = render_autoexec("", &s);
+        assert!(!text.contains("kill"), "unbound action leaked: {text}");
+    }
+
+    #[test]
+    fn existing_bind_line_removed_when_unbound() {
+        let mut s = Settings::defaults();
+        s.bindings.insert("kill".into(), "".into());
+        let text = render_autoexec("bind x kill\n", &s);
+        assert!(!text.contains("kill"), "stale bind survived: {text}");
+    }
+
+    #[test]
+    fn new_defaults_present() {
+        let d = Settings::defaults();
+        assert_eq!(d.cvars.get("r_fullscreen"), Some(&"1".to_string()));
+        assert_eq!(d.cvars.get("s_music_volume"), Some(&"0.5".to_string()));
+        assert_eq!(d.cvars.get("hook_style"), Some(&"pull".to_string()));
+        assert_eq!(d.bindings.get("+move_down"), Some(&"c".to_string()));
+        assert_eq!(d.bindings.get("cg_weapon_next"), Some(&"mouse wheel down".to_string()));
+        assert_eq!(d.bindings.get("+ZOOM"), Some(&"left alt".to_string()));
+        assert_eq!(d.bindings.get("kill"), Some(&"".to_string()));
+        assert_eq!(d.cvars.len(), 46);
+        assert_eq!(d.bindings.len(), 31);
+    }
+
+    #[test]
+    fn full_tables_round_trip() {
+        let d = Settings::defaults();
+        let text = render_autoexec("", &d);
+        let parsed = parse_settings(&text);
+        // Unbound-by-default actions aren't written, so they parse as defaults
+        // (empty) — full equality must still hold.
+        assert_eq!(parsed, d);
     }
 }
