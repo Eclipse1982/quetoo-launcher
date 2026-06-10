@@ -50,7 +50,7 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
             .map(|p| p.to_string_lossy().into_owned()),
         latest_version: release.tag_name,
         state,
-        can_rollback: false,
+        can_rollback: false, // placeholder: snapshot rollback lands with the snapshot module
     })
 }
 
