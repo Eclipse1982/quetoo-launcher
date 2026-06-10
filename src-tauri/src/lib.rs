@@ -4,6 +4,7 @@ mod github;
 mod installer;
 mod launcher;
 mod qconfig;
+mod snapshot;
 
 use config::Config;
 use error::Result;

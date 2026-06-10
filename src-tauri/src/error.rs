@@ -18,6 +18,8 @@ pub enum LauncherError {
     Config(String),
     #[error("failed to launch Quetoo: {0}")]
     Launch(String),
+    #[error("rollback error: {0}")]
+    Rollback(String),
 }
 
 impl Serialize for LauncherError {
