@@ -45,6 +45,31 @@ pub fn detect_format(file_name: &str) -> Result<ArchiveFormat> {
     }
 }
 
+/// True if `rel` escapes the install dir or touches the reserved .rollback
+/// area: empty, absolute, drive-prefixed, any `..`, or whose first
+/// non-`.` component is `.rollback` (ASCII case-insensitive — NTFS).
+pub(crate) fn is_unsafe_rel_path(rel: &str) -> bool {
+    use std::path::Component;
+    let path = std::path::Path::new(rel);
+    let mut first_normal: Option<&std::ffi::OsStr> = None;
+    for c in path.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return true,
+            Component::CurDir => continue,
+            Component::Normal(name) => {
+                first_normal.get_or_insert(name);
+            }
+        }
+    }
+    match first_normal {
+        None => true, // empty or "." only
+        Some(name) => name
+            .to_str()
+            .map(|s| s.eq_ignore_ascii_case(".rollback"))
+            .unwrap_or(true), // non-UTF8 first component: reject
+    }
+}
+
 /// Stream-download `asset` to `dest`, emitting download progress.
 pub async fn download_asset(
     app: &AppHandle,
@@ -115,15 +140,13 @@ pub fn list_entries(archive: &Path, format: ArchiveFormat) -> Result<Vec<String>
                     continue;
                 }
                 if let Some(name) = entry.enclosed_name() {
-                    // Archives must not write into the launcher's rollback area.
-                    let first_component = name.components().next();
-                    if matches!(
-                        first_component,
-                        Some(std::path::Component::Normal(s)) if s == ".rollback"
-                    ) {
+                    let rel = name.to_string_lossy().replace('\\', "/");
+                    // Archives must not write into the launcher's rollback area;
+                    // is_unsafe_rel_path also catches ./-prefix and case variants.
+                    if is_unsafe_rel_path(&rel) {
                         continue;
                     }
-                    out.push(name.to_string_lossy().replace('\\', "/"));
+                    out.push(rel);
                 }
             }
             Ok(out)
@@ -139,20 +162,13 @@ pub fn list_entries(archive: &Path, format: ArchiveFormat) -> Result<Vec<String>
                     continue;
                 }
                 let p = entry.path().map_err(|e| LauncherError::Extract(e.to_string()))?;
-                if p.is_absolute()
-                    || p.components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
+                let rel = p.to_string_lossy().replace('\\', "/");
+                // is_unsafe_rel_path covers absolute, .., ./-prefix, and
+                // case-insensitive .rollback reservation.
+                if is_unsafe_rel_path(&rel) {
                     continue;
                 }
-                // Archives must not write into the launcher's rollback area.
-                if matches!(
-                    p.components().next(),
-                    Some(std::path::Component::Normal(s)) if s == ".rollback"
-                ) {
-                    continue;
-                }
-                out.push(p.to_string_lossy().replace('\\', "/"));
+                out.push(rel);
             }
             Ok(out)
         }
@@ -192,23 +208,29 @@ fn extract_zip(archive: &Path, dest: &Path, progress: &mut dyn FnMut(usize, usiz
             .by_index(i)
             .map_err(|e| LauncherError::Extract(e.to_string()))?;
         if let Some(rel) = entry.enclosed_name() {
-            let out = dest.join(&rel);
-            if entry.is_dir() {
-                std::fs::create_dir_all(&out)?;
-            } else {
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let mut f = std::fs::File::create(&out)?;
-                std::io::copy(&mut entry, &mut f)?;
-                #[cfg(unix)]
-                if let Some(mode) = entry.unix_mode() {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            // Archives must never write into the reserved .rollback area;
+            // extraction is the enforcement point because the install flow
+            // doesn't gate on list_entries.
+            if !is_unsafe_rel_path(&rel_str) {
+                let out = dest.join(&rel);
+                if entry.is_dir() {
+                    std::fs::create_dir_all(&out)?;
+                } else {
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut f = std::fs::File::create(&out)?;
+                    std::io::copy(&mut entry, &mut f)?;
+                    #[cfg(unix)]
+                    if let Some(mode) = entry.unix_mode() {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
+                    }
                 }
             }
         }
-        // Always report progress for every entry (including skipped non-enclosed-name entries)
+        // Always report progress for every entry (including skipped entries)
         // so the progress bar advances uniformly.
         progress(i + 1, total);
     }
@@ -241,9 +263,21 @@ fn extract_targz(
         .enumerate()
     {
         let mut entry = entry.map_err(|e| LauncherError::Extract(e.to_string()))?;
-        entry
-            .unpack_in(dest)
-            .map_err(|e| LauncherError::Extract(e.to_string()))?;
+        // Archives must never write into the reserved .rollback area;
+        // extraction is the enforcement point because the install flow
+        // doesn't gate on list_entries.
+        let skip = match entry.path() {
+            Ok(p) => {
+                let rel = p.to_string_lossy().replace('\\', "/");
+                !rel.is_empty() && is_unsafe_rel_path(&rel)
+            }
+            Err(_) => true, // non-UTF8 or unreadable path: skip
+        };
+        if !skip {
+            entry
+                .unpack_in(dest)
+                .map_err(|e| LauncherError::Extract(e.to_string()))?;
+        }
         progress(i + 1, total);
     }
     Ok(())
@@ -496,5 +530,155 @@ mod tests {
         let entries = list_entries(&archive, ArchiveFormat::Zip).unwrap();
         // Only safe.txt should appear; .rollback/evil.txt must be skipped.
         assert_eq!(entries, vec!["safe.txt".to_string()]);
+    }
+
+    // --- Bypass A/B/C tests (TDD red phase) ---
+
+    /// Build a zip with:
+    ///   safe.txt             – normal entry that must be extracted
+    ///   ./.rollback/evil.txt – CurDir bypass (bypass A)
+    ///   .ROLLBACK/evil2.txt  – NTFS case bypass (bypass B)
+    ///   bin/.rollback/x      – interior .rollback, must NOT be filtered
+    fn make_bypass_zip(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("bypass.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        zip.start_file("safe.txt", opts).unwrap();
+        zip.write_all(b"safe-content").unwrap();
+        zip.start_file("./.rollback/evil.txt", opts).unwrap();
+        zip.write_all(b"evil-curdirbypass").unwrap();
+        zip.start_file(".ROLLBACK/evil2.txt", opts).unwrap();
+        zip.write_all(b"evil-casebypass").unwrap();
+        zip.start_file("bin/.rollback/x", opts).unwrap();
+        zip.write_all(b"interior-ok").unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    /// list_entries must omit ./.rollback/evil.txt and .ROLLBACK/evil2.txt
+    /// but must keep bin/.rollback/x (interior .rollback is not reserved).
+    #[test]
+    fn list_entries_zip_skips_curdirprefix_and_case_rollback_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_bypass_zip(dir.path());
+        let mut entries = list_entries(&archive, ArchiveFormat::Zip).unwrap();
+        entries.sort();
+        // safe.txt and bin/.rollback/x accepted; both hostile entries omitted.
+        assert!(entries.contains(&"safe.txt".to_string()), "safe.txt must be listed");
+        assert!(entries.contains(&"bin/.rollback/x".to_string()), "interior bin/.rollback/x must be listed");
+        assert!(
+            !entries.iter().any(|e| e.contains("evil")),
+            "hostile .rollback entries must be filtered: {entries:?}"
+        );
+    }
+
+    /// extract_archive must NOT write ./.rollback/evil.txt or .ROLLBACK/evil2.txt
+    /// under dest, MUST write safe.txt and bin/.rollback/x, and progress must
+    /// complete with done == total.
+    #[test]
+    fn extract_zip_skips_bypass_rollback_entries_and_progress_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_bypass_zip(dir.path());
+        let dest = dir.path().join("install");
+        let mut calls: Vec<(usize, usize)> = vec![];
+        extract_archive(&archive, ArchiveFormat::Zip, &dest, &mut |d, t| {
+            calls.push((d, t))
+        })
+        .unwrap();
+
+        // Hostile entries must NOT appear under dest.
+        assert!(
+            !dest.join(".rollback").join("evil.txt").exists(),
+            "bypass A: ./.rollback/evil.txt must not be extracted"
+        );
+        // Case bypass: check both capitalizations since the FS may fold case.
+        assert!(
+            !dest.join(".rollback").join("evil2.txt").exists()
+                && !dest.join(".ROLLBACK").join("evil2.txt").exists(),
+            "bypass B: .ROLLBACK/evil2.txt must not be extracted"
+        );
+
+        // Safe sibling must be present.
+        assert!(dest.join("safe.txt").exists(), "safe.txt must be extracted");
+        assert_eq!(
+            std::fs::read(dest.join("safe.txt")).unwrap(),
+            b"safe-content"
+        );
+
+        // Interior .rollback must be present.
+        assert!(
+            dest.join("bin").join(".rollback").join("x").exists(),
+            "bin/.rollback/x (interior) must be extracted"
+        );
+
+        // Progress must complete: last call has done == total.
+        assert!(!calls.is_empty());
+        let (done, total) = *calls.last().unwrap();
+        assert_eq!(done, total, "progress must complete even when hostile entries are skipped");
+    }
+
+    /// Build a tar.gz with:
+    ///   safe.txt           – normal entry
+    ///   .rollback/evil.txt – bypass C (tar path, no enclosed_name guard)
+    fn make_bypass_targz(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("bypass.tar.gz");
+        let file = std::fs::File::create(&path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(12);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "safe.txt", &b"safe-content"[..]).unwrap();
+
+        let mut header2 = tar::Header::new_gnu();
+        header2.set_size(9);
+        header2.set_mode(0o644);
+        header2.set_cksum();
+        tar.append_data(&mut header2, ".rollback/evil.txt", &b"evil-tar1"[..]).unwrap();
+
+        tar.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    /// list_entries (tar) must omit .rollback/evil.txt.
+    #[test]
+    fn list_entries_targz_skips_rollback_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_bypass_targz(dir.path());
+        let entries = list_entries(&archive, ArchiveFormat::TarGz).unwrap();
+        assert!(entries.contains(&"safe.txt".to_string()), "safe.txt must be listed");
+        assert!(
+            !entries.iter().any(|e| e.contains("evil")),
+            "hostile .rollback entry must be omitted: {entries:?}"
+        );
+    }
+
+    /// extract_archive (tar) must NOT write .rollback/evil.txt under dest,
+    /// MUST write safe.txt, and progress must complete.
+    #[test]
+    fn extract_targz_skips_rollback_entry_and_progress_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = make_bypass_targz(dir.path());
+        let dest = dir.path().join("install");
+        let mut calls: Vec<(usize, usize)> = vec![];
+        extract_archive(&archive, ArchiveFormat::TarGz, &dest, &mut |d, t| {
+            calls.push((d, t))
+        })
+        .unwrap();
+
+        assert!(
+            !dest.join(".rollback").join("evil.txt").exists(),
+            "bypass C: .rollback/evil.txt must not be extracted from tar"
+        );
+        assert!(dest.join("safe.txt").exists(), "safe.txt must be extracted from tar");
+
+        // Progress must complete.
+        let real_calls: Vec<_> = calls.iter().filter(|&&(_, t)| t > 0).collect();
+        assert!(!real_calls.is_empty(), "expected progress calls");
+        let &(done, total) = real_calls.last().unwrap();
+        assert_eq!(done, total, "last progress call must have done == total");
     }
 }

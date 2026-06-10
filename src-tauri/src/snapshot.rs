@@ -1,4 +1,5 @@
 use crate::error::{LauncherError, Result};
+use crate::installer::is_unsafe_rel_path;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -37,23 +38,13 @@ pub fn load_manifest(install_dir: &Path) -> Result<Option<Manifest>> {
 }
 
 /// Reject entry paths that could write or delete outside the install dir or
-/// touch the snapshot itself: absolute paths, drive prefixes, `..`, or a
-/// leading `.rollback` component. The manifest round-trips through a
-/// user-writable JSON file, so rollback must not trust it blindly.
+/// touch the snapshot itself: empty, absolute, drive-prefixed, any `..`,
+/// paths whose only component is `.` (CurDir), or whose first non-`.`
+/// component is `.rollback` (ASCII case-insensitive — NTFS). The manifest
+/// round-trips through a user-writable JSON file, so rollback must not
+/// trust it blindly.
 fn validate_rel_path(rel: &str) -> Result<()> {
-    use std::path::Component;
-    let path = Path::new(rel);
-    let mut components = path.components();
-    let first = components.next();
-    let bad = match first {
-        None => true,
-        Some(Component::Prefix(_)) | Some(Component::RootDir) | Some(Component::ParentDir) => true,
-        Some(Component::Normal(name)) => name == ".rollback",
-        _ => false,
-    } || path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir));
-    if bad {
+    if is_unsafe_rel_path(rel) {
         return Err(LauncherError::Rollback(format!("unsafe path in snapshot: {rel}")));
     }
     Ok(())
@@ -388,6 +379,34 @@ mod tests {
 
         // Sentinel must still exist — rollback must not have acted on anything.
         assert!(sentinel.exists(), "rollback must not delete files when manifest is hostile");
+    }
+
+    // ── Bypass A / B tests: CurDir prefix and NTFS case bypass ─────────────
+
+    /// validate_rel_path must reject "./.rollback/x" — the leading CurDir
+    /// component must not allow bypassing the .rollback reservation.
+    #[test]
+    fn create_snapshot_rejects_curdirprefix_rollback_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let hostile = vec!["./.rollback/x".to_string()];
+        let err = create_snapshot(dir.path(), &hostile, "v1", "v2");
+        assert!(
+            matches!(err, Err(LauncherError::Rollback(_))),
+            "expected Rollback error for ./.rollback/x, got: {err:?}"
+        );
+    }
+
+    /// validate_rel_path must reject ".ROLLBACK/x" — NTFS is case-insensitive
+    /// so the upper-cased form reaches the real .rollback directory.
+    #[test]
+    fn create_snapshot_rejects_case_bypass_rollback_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let hostile = vec![".ROLLBACK/x".to_string()];
+        let err = create_snapshot(dir.path(), &hostile, "v1", "v2");
+        assert!(
+            matches!(err, Err(LauncherError::Rollback(_))),
+            "expected Rollback error for .ROLLBACK/x, got: {err:?}"
+        );
     }
 
     // ── FIX 4 test ──────────────────────────────────────────────────────────
