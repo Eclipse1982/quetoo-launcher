@@ -224,7 +224,9 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
             if written_cvars.contains(name) {
                 continue; // collapse duplicates
             }
-            let value = settings.cvars.get(name).cloned().unwrap_or_default();
+            // Strip quotes before the empty checks so a quotes-only value is
+            // treated as empty (quote_if_needed strips them anyway on write).
+            let value = settings.cvars.get(name).cloned().unwrap_or_default().replace('"', "");
             if name == "name" && value.is_empty() {
                 continue; // don't write an empty name
             }
@@ -235,7 +237,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
             if written_binds.contains(&command) {
                 continue;
             }
-            let key = settings.bindings.get(&command).cloned().unwrap_or_default();
+            let key = settings.bindings.get(&command).cloned().unwrap_or_default().replace('"', "");
             if key.is_empty() {
                 written_binds.insert(command);
                 continue;
@@ -250,7 +252,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     // Append any managed entries not already present.
     for (name, _) in CVARS {
         if !written_cvars.contains(*name) {
-            let value = settings.cvars.get(*name).cloned().unwrap_or_default();
+            let value = settings.cvars.get(*name).cloned().unwrap_or_default().replace('"', "");
             if *name == "name" && value.is_empty() {
                 continue;
             }
@@ -259,7 +261,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     }
     for (_, command, _) in BINDINGS {
         if !written_binds.contains(*command) {
-            let key = settings.bindings.get(*command).cloned().unwrap_or_default();
+            let key = settings.bindings.get(*command).cloned().unwrap_or_default().replace('"', "");
             if key.is_empty() {
                 continue;
             }

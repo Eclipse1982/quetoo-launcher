@@ -193,9 +193,12 @@ export default function Settings({ onBack, installDir, installed, onUninstall }:
         </section>
       ))}
 
+      <p className="hint">
+        Click a binding, then press a key to bind it — Backspace clears, Esc cancels.
+      </p>
       {bindGroups.map(([section, fields]) => (
         <section key={section}>
-          <h3>{section} <span className="hint">click a key, then press a key to bind — Backspace clears, Esc cancels</span></h3>
+          <h3>{section}</h3>
           {fields.map(({ command, label }) => {
             const boundKey = settings.bindings[command] ?? '';
             return (
