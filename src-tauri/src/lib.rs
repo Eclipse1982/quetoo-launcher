@@ -4,13 +4,11 @@ mod github;
 mod installer;
 mod launcher;
 mod qconfig;
+mod snapshot;
 
 use config::Config;
 use error::Result;
-use github::{
-    determine_state, fetch_latest_release, fetch_railwarz_release, select_asset, AssetKind,
-    InstallState,
-};
+use github::{determine_state, fetch_latest_release, select_asset, AssetKind, InstallState};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -35,23 +33,30 @@ fn http_client() -> reqwest::Client {
 #[serde(rename_all = "camelCase")]
 struct StatusDto {
     install_dir: Option<String>,
+    default_install_dir: Option<String>,
     latest_version: String,
     state: InstallState,
+    can_rollback: bool,
 }
 
 /// Check GitHub and return the current launcher status.
 #[tauri::command]
 async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::LauncherError> {
     let cfg = Config::load(&config_path(&app)?)?;
-    let client = http_client();
-    let official = fetch_latest_release(&client).await?;
-    let railwarz = fetch_railwarz_release(&client).await?;
-    let state = determine_state(&cfg, &official.tag_name, &railwarz.tag_name);
+    let release = fetch_latest_release(&http_client()).await?;
+    let state = determine_state(&cfg, &release.tag_name);
+    let can_rollback = match &cfg.install_dir {
+        // Degrade to false on a bad manifest — status must always render.
+        Some(dir) => snapshot::load_manifest(dir).ok().flatten().is_some(),
+        None => false,
+    };
     Ok(StatusDto {
         install_dir: cfg.install_dir.map(|p| p.to_string_lossy().into_owned()),
-        // Headline the RailWarz overlay version; note the official base it sits on.
-        latest_version: format!("{} (base {})", railwarz.tag_name, official.tag_name),
+        default_install_dir: config::default_install_dir(std::env::consts::OS)
+            .map(|p| p.to_string_lossy().into_owned()),
+        latest_version: release.tag_name,
         state,
+        can_rollback,
     })
 }
 
@@ -68,9 +73,27 @@ async fn set_install_dir(
     Ok(())
 }
 
-/// Install/update Quetoo RailWarz: install or update the official base (engine + game
-/// data), then overlay our matched RailWarz engine + game/cgame modules on top.
-/// Each step records its version only on success, so the operation is resumable.
+/// Pre-flight guard: on non-macOS, check that the game executable is not
+/// currently held open (which would cause cryptic os error 32 mid-extract).
+/// Returns `Busy` error if the game appears to be running.
+fn ensure_game_not_running(install_dir: &std::path::Path, os: &str) -> Result<()> {
+    if os == "macos" {
+        return Ok(());
+    }
+    let target = launcher::executable_path(install_dir, os)?;
+    if target.exists()
+        && std::fs::OpenOptions::new().write(true).open(&target).is_err()
+    {
+        return Err(error::LauncherError::Busy(
+            "Quetoo appears to be running — close the game and try again".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Install or update official Quetoo. First install downloads the full
+/// bundle (engine + game data); afterwards the small update asset.
+/// Updates snapshot the files they overwrite so they can be rolled back.
 #[tauri::command]
 async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     let path = config_path(&app)?;
@@ -83,42 +106,146 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     let client = http_client();
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
+    let release = fetch_latest_release(&client).await?;
 
-    let official = fetch_latest_release(&client).await?;
-    let railwarz = fetch_railwarz_release(&client).await?;
+    // Bundle if we've never installed one; otherwise a small update.
+    let kind = if cfg.bundle_installed {
+        AssetKind::Update
+    } else {
+        AssetKind::Bundle
+    };
+    let asset = select_asset(&release, os, arch, kind)?.clone();
 
-    // 1) Base — official Quetoo. Bundle (engine + game data) on first install, else a
-    //    small update when upstream has moved. An official update overwrites our overlaid
-    //    modules, so it forces a re-overlay (railwarz_version cleared) below.
-    let base_changed = !cfg.bundle_installed
-        || cfg.installed_version.as_deref() != Some(official.tag_name.as_str());
-    if base_changed {
-        let kind = if cfg.bundle_installed {
-            AssetKind::Update
+    // Pre-flight: on non-macOS, refuse to update if the executable is locked
+    // (Windows holds running executables open). Checked before any download so
+    // nothing is touched on failure.
+    if kind == AssetKind::Update {
+        ensure_game_not_running(&install_dir, os)?;
+    }
+
+    std::fs::create_dir_all(&install_dir)?;
+    let tmp = install_dir.join(format!(".{}", asset.name));
+    if let Err(e) = installer::download_asset(&app, &client, &asset, &tmp).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let format = installer::detect_format(&asset.name)?;
+
+    // Snapshot before updates only — a failed snapshot aborts the update.
+    if kind == AssetKind::Update {
+        if snapshot::has_snapshot_for(&install_dir, &release.tag_name) {
+            // A prior attempt already captured the pre-update state for this
+            // version transition. Reuse it — re-snapshotting after a failed
+            // mid-extract would capture a mixed/new tree as "old".
+            installer::emit_progress(&app, "snapshot", 100, "Reusing existing backup".into());
         } else {
-            AssetKind::Bundle
-        };
-        let asset = select_asset(&official, os, arch, kind)?.clone();
-        installer::download_and_install(&app, &client, &asset, &install_dir).await?;
-        if kind == AssetKind::Bundle {
-            cfg.bundle_installed = true;
+            installer::emit_progress(&app, "snapshot", 0, "Backing up current version".into());
+            let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
+            let snap_result = if os == "macos" {
+                snapshot::create_snapshot_macos(&install_dir, &from, &release.tag_name).map(|_| ())
+            } else {
+                installer::list_entries(&tmp, format).and_then(|entries| {
+                    snapshot::create_snapshot(&install_dir, &entries, &from, &release.tag_name)
+                        .map(|_| ())
+                })
+            };
+            if let Err(e) = snap_result {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            installer::emit_progress(&app, "snapshot", 100, "Backup complete".into());
         }
-        cfg.installed_version = Some(official.tag_name.clone());
-        cfg.railwarz_version = None; // a fresh base wipes any prior overlay
-        cfg.save(&path)?;
     }
 
-    // 2) Overlay — RailWarz binaries only (engine + game.dll/cgame.dll); game data comes
-    //    from the base. Extracts over the install dir so the matched build wins.
-    let overlay_changed = cfg.railwarz_version.as_deref() != Some(railwarz.tag_name.as_str());
-    if overlay_changed {
-        let asset = select_asset(&railwarz, os, arch, AssetKind::Update)?.clone();
-        installer::download_and_install(&app, &client, &asset, &install_dir).await?;
-        cfg.railwarz_version = Some(railwarz.tag_name.clone());
-        cfg.save(&path)?;
-    }
+    let app2 = app.clone();
+    let extract_result =
+        installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
+            let percent = installer::percent(done as u64, total as u64);
+            let detail = if total == 0 {
+                "Preparing\u{2026}".to_string()
+            } else {
+                format!("{done}/{total} files")
+            };
+            installer::emit_progress(&app2, "extract", percent, detail);
+        });
+    let _ = std::fs::remove_file(&tmp);
+    extract_result?;
 
+    // Verify the launch target exists before declaring success.
+    installer::emit_progress(&app, "verify", 50, "Verifying installation".into());
+    let target = launcher::executable_path(&install_dir, os)?;
+    if !target.exists() {
+        return Err(error::LauncherError::Extract(format!(
+            "install incomplete: {} missing",
+            target.display()
+        )));
+    }
+    installer::emit_progress(&app, "verify", 100, "Done".into());
+
+    if kind == AssetKind::Bundle {
+        cfg.bundle_installed = true;
+    }
+    cfg.installed_version = Some(release.tag_name);
+    cfg.save(&path)?;
     Ok(())
+}
+
+/// Restore the previous version from the pre-update snapshot.
+#[tauri::command]
+async fn rollback_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let install_dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+    // Preflight: rollback overwrites bin/quetoo.exe; a running game would die
+    // mid-restore with os error 32 (Windows file-locked).
+    ensure_game_not_running(&install_dir, std::env::consts::OS)?;
+    let from_version = snapshot::rollback(&install_dir)?;
+    cfg.installed_version = Some(from_version);
+    cfg.save(&path)?;
+    Ok(())
+}
+
+/// Wipe the install directory and re-download the full bundle.
+#[tauri::command]
+async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let install_dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+
+    let os = std::env::consts::OS;
+    ensure_game_not_running(&install_dir, os)?;
+
+    if !installer::is_safe_reinstall_target(&install_dir)? {
+        return Err(error::LauncherError::Config(format!(
+            "{} doesn't look like a Quetoo install; refusing to delete it",
+            install_dir.display()
+        )));
+    }
+    // Reset config BEFORE the deletion loop: if a locked file interrupts the
+    // wipe mid-way, the config must already reflect NotInstalled so that a
+    // plain Install can self-heal. Saving config after a partial wipe would
+    // leave bundle_installed=true on a gutted tree, causing the sanity guard
+    // to refuse a retry.
+    cfg.installed_version = None;
+    cfg.bundle_installed = false;
+    cfg.save(&path)?;
+    if install_dir.exists() {
+        for entry in std::fs::read_dir(&install_dir)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+        }
+    }
+    install_or_update(app).await
 }
 
 /// Launch the installed game.
@@ -162,6 +289,8 @@ pub fn run() {
             get_status,
             set_install_dir,
             install_or_update,
+            rollback_update,
+            reinstall,
             play,
             get_quetoo_settings,
             save_quetoo_settings,

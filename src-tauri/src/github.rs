@@ -60,39 +60,25 @@ pub enum InstallState {
     UpToDate,
 }
 
-/// Decide what the launcher should do given the current config, the latest official
-/// (base) tag, and the latest RailWarz (overlay) tag. An update is needed if EITHER
-/// the official base or the RailWarz overlay has moved.
-pub fn determine_state(cfg: &Config, official_tag: &str, railwarz_tag: &str) -> InstallState {
+/// Decide what the launcher should do given current config and the latest tag.
+pub fn determine_state(cfg: &Config, latest_tag: &str) -> InstallState {
     match (&cfg.install_dir, cfg.bundle_installed, &cfg.installed_version) {
-        (Some(_), true, Some(installed))
-            if installed == official_tag
-                && cfg.railwarz_version.as_deref() == Some(railwarz_tag) =>
-        {
-            InstallState::UpToDate
-        }
+        (Some(_), true, Some(installed)) if installed == latest_tag => InstallState::UpToDate,
         (Some(_), true, Some(installed)) => InstallState::UpdateAvailable {
-            from: format!(
-                "{}+{}",
-                installed,
-                cfg.railwarz_version.as_deref().unwrap_or("none")
-            ),
-            to: format!("{official_tag}+{railwarz_tag}"),
+            from: installed.clone(),
+            to: latest_tag.to_string(),
         },
         _ => InstallState::NotInstalled,
     }
 }
 
-/// Official upstream Quetoo: the base install (engine + game data) the overlay sits on.
-const OFFICIAL_RELEASE_URL: &str = "https://api.github.com/repos/jdolan/quetoo/releases/latest";
-/// Eclipse1982/quetoo RailWarz: the matched engine + game/cgame modules overlay.
-const RAILWARZ_RELEASE_URL: &str =
-    "https://api.github.com/repos/Eclipse1982/quetoo/releases/latest";
+const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/jdolan/quetoo/releases/latest";
 
-/// Fetch a "latest release" from the GitHub API at `url`.
-pub async fn fetch_release(client: &reqwest::Client, url: &str) -> Result<Release> {
+/// Fetch the latest Quetoo release from the GitHub API.
+pub async fn fetch_latest_release(client: &reqwest::Client) -> Result<Release> {
     let resp = client
-        .get(url)
+        .get(LATEST_RELEASE_URL)
         .header("User-Agent", "quetoo-launcher")
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -108,16 +94,6 @@ pub async fn fetch_release(client: &reqwest::Client, url: &str) -> Result<Releas
     resp.json::<Release>()
         .await
         .map_err(|e| LauncherError::Network(e.to_string()))
-}
-
-/// Latest official Quetoo release (base bundle/update source).
-pub async fn fetch_latest_release(client: &reqwest::Client) -> Result<Release> {
-    fetch_release(client, OFFICIAL_RELEASE_URL).await
-}
-
-/// Latest RailWarz release (overlay source).
-pub async fn fetch_railwarz_release(client: &reqwest::Client) -> Result<Release> {
-    fetch_release(client, RAILWARZ_RELEASE_URL).await
 }
 
 #[cfg(test)]
@@ -154,7 +130,6 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some(version.into()),
             bundle_installed: true,
-            railwarz_version: Some("railwarz-v1".into()),
         }
     }
 
@@ -201,10 +176,7 @@ mod tests {
     #[test]
     fn not_installed_when_no_dir() {
         let cfg = Config::default();
-        assert_eq!(
-            determine_state(&cfg, "v1.0.25", "railwarz-v1"),
-            InstallState::NotInstalled
-        );
+        assert_eq!(determine_state(&cfg, "v1.0.25"), InstallState::NotInstalled);
     }
 
     #[test]
@@ -213,45 +185,22 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some("v1.0.25".into()),
             bundle_installed: false,
-            railwarz_version: None,
         };
-        assert_eq!(
-            determine_state(&cfg, "v1.0.25", "railwarz-v1"),
-            InstallState::NotInstalled
-        );
+        assert_eq!(determine_state(&cfg, "v1.0.25"), InstallState::NotInstalled);
     }
 
     #[test]
-    fn up_to_date_when_both_versions_match() {
+    fn up_to_date_when_versions_match() {
         let cfg = installed_config("v1.0.25");
-        assert_eq!(
-            determine_state(&cfg, "v1.0.25", "railwarz-v1"),
-            InstallState::UpToDate
-        );
+        assert_eq!(determine_state(&cfg, "v1.0.25"), InstallState::UpToDate);
     }
 
     #[test]
-    fn update_available_when_base_differs() {
+    fn update_available_when_versions_differ() {
         let cfg = installed_config("v1.0.24");
         assert_eq!(
-            determine_state(&cfg, "v1.0.25", "railwarz-v1"),
-            InstallState::UpdateAvailable {
-                from: "v1.0.24+railwarz-v1".into(),
-                to: "v1.0.25+railwarz-v1".into()
-            }
-        );
-    }
-
-    #[test]
-    fn update_available_when_only_overlay_differs() {
-        // Base unchanged, but a new RailWarz overlay is out -> update needed.
-        let cfg = installed_config("v1.0.25");
-        assert_eq!(
-            determine_state(&cfg, "v1.0.25", "railwarz-v2"),
-            InstallState::UpdateAvailable {
-                from: "v1.0.25+railwarz-v1".into(),
-                to: "v1.0.25+railwarz-v2".into()
-            }
+            determine_state(&cfg, "v1.0.25"),
+            InstallState::UpdateAvailable { from: "v1.0.24".into(), to: "v1.0.25".into() }
         );
     }
 }
