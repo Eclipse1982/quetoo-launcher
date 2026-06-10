@@ -188,6 +188,18 @@ pub fn rollback(install_dir: &Path) -> Result<String> {
     Ok(manifest.from_version)
 }
 
+/// True if an existing snapshot already captures the pre-update state for
+/// an update to `to_version` — i.e. a retry of the same transition. Reusing
+/// it (instead of re-snapshotting) preserves the true old files when the
+/// previous attempt failed mid-extract. Degrades to false on any error.
+pub fn has_snapshot_for(install_dir: &Path, to_version: &str) -> bool {
+    load_manifest(install_dir)
+        .ok()
+        .flatten()
+        .map(|m| m.to_version == to_version)
+        .unwrap_or(false)
+}
+
 /// FIX 3: Symlink-safe recursive directory copy.
 ///
 /// Uses entry.file_type()? (non-following / lstat) to distinguish file types:
@@ -466,6 +478,43 @@ mod tests {
         // After success: manifest gone, rollback root gone.
         assert!(load_manifest(dir.path()).unwrap().is_none());
         assert!(!rollback_root(dir.path()).exists());
+    }
+
+    // ── has_snapshot_for tests ───────────────────────────────────────────────
+
+    /// Matching to_version → true.
+    #[test]
+    fn has_snapshot_for_matching_version_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), "data");
+        create_snapshot(dir.path(), &["a.txt".to_string()], "v1", "v1.0.25").unwrap();
+        assert!(has_snapshot_for(dir.path(), "v1.0.25"));
+    }
+
+    /// Different to_version → false.
+    #[test]
+    fn has_snapshot_for_different_version_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), "data");
+        create_snapshot(dir.path(), &["a.txt".to_string()], "v1", "v1.0.24").unwrap();
+        assert!(!has_snapshot_for(dir.path(), "v1.0.25"));
+    }
+
+    /// No manifest → false.
+    #[test]
+    fn has_snapshot_for_no_manifest_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_snapshot_for(dir.path(), "v1.0.25"));
+    }
+
+    /// Corrupt manifest → false (degrades gracefully).
+    #[test]
+    fn has_snapshot_for_corrupt_manifest_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollback_dir = dir.path().join(".rollback");
+        std::fs::create_dir_all(&rollback_dir).unwrap();
+        std::fs::write(rollback_dir.join("manifest.json"), b"not valid json").unwrap();
+        assert!(!has_snapshot_for(dir.path(), "v1.0.25"));
     }
 
     /// The manifest write is atomic (tmp + rename), so a partial write during

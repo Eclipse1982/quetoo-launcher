@@ -46,7 +46,8 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
     let release = fetch_latest_release(&http_client()).await?;
     let state = determine_state(&cfg, &release.tag_name);
     let can_rollback = match &cfg.install_dir {
-        Some(dir) => snapshot::load_manifest(dir)?.is_some(),
+        // Degrade to false on a bad manifest — status must always render.
+        Some(dir) => snapshot::load_manifest(dir).ok().flatten().is_some(),
         None => false,
     };
     Ok(StatusDto {
@@ -97,6 +98,22 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     };
     let asset = select_asset(&release, os, arch, kind)?.clone();
 
+    // Pre-flight: on non-macOS, refuse to update if the executable is locked
+    // (Windows holds running executables open). Checked before any download so
+    // nothing is touched on failure.
+    if kind == AssetKind::Update && os != "macos" {
+        let target = launcher::executable_path(&install_dir, os)?;
+        if target.exists() {
+            // Windows holds running executables open; a locked exe would
+            // otherwise fail mid-extract with a cryptic os error 32.
+            if std::fs::OpenOptions::new().write(true).open(&target).is_err() {
+                return Err(error::LauncherError::Launch(
+                    "Quetoo appears to be running — close the game and try again".into(),
+                ));
+            }
+        }
+    }
+
     std::fs::create_dir_all(&install_dir)?;
     let tmp = install_dir.join(format!(".{}", asset.name));
     installer::download_asset(&app, &client, &asset, &tmp).await?;
@@ -104,21 +121,28 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
 
     // Snapshot before updates only — a failed snapshot aborts the update.
     if kind == AssetKind::Update {
-        installer::emit_progress(&app, "snapshot", 0, "Backing up current version".into());
-        let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
-        let snap_result = if os == "macos" {
-            snapshot::create_snapshot_macos(&install_dir, &from, &release.tag_name).map(|_| ())
+        if snapshot::has_snapshot_for(&install_dir, &release.tag_name) {
+            // A prior attempt already captured the pre-update state for this
+            // version transition. Reuse it — re-snapshotting after a failed
+            // mid-extract would capture a mixed/new tree as "old".
+            installer::emit_progress(&app, "snapshot", 100, "Reusing existing backup".into());
         } else {
-            installer::list_entries(&tmp, format).and_then(|entries| {
-                snapshot::create_snapshot(&install_dir, &entries, &from, &release.tag_name)
-                    .map(|_| ())
-            })
-        };
-        if let Err(e) = snap_result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
+            installer::emit_progress(&app, "snapshot", 0, "Backing up current version".into());
+            let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
+            let snap_result = if os == "macos" {
+                snapshot::create_snapshot_macos(&install_dir, &from, &release.tag_name).map(|_| ())
+            } else {
+                installer::list_entries(&tmp, format).and_then(|entries| {
+                    snapshot::create_snapshot(&install_dir, &entries, &from, &release.tag_name)
+                        .map(|_| ())
+                })
+            };
+            if let Err(e) = snap_result {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            installer::emit_progress(&app, "snapshot", 100, "Backup complete".into());
         }
-        installer::emit_progress(&app, "snapshot", 100, "Backup complete".into());
     }
 
     let app2 = app.clone();
