@@ -10,6 +10,7 @@ import {
   reinstall,
   rollbackUpdate,
   setInstallDir,
+  uninstall,
   type LauncherUpdate,
 } from './api';
 import type { InstallPhase, Status } from './types';
@@ -97,6 +98,22 @@ export default function App() {
     }, 'Starting…');
   }
 
+  async function handleUninstall() {
+    if (!status?.installDir) return;
+    const ok = await confirmDialog(
+      `This deletes Quetoo from ${status.installDir}. Continue?`,
+      'Uninstall Quetoo',
+    );
+    if (!ok) return;
+    const purge = await confirmDialog(
+      'Also delete your settings, screenshots, demos and downloaded maps? ' +
+        'These are shared by ALL Quetoo versions and mods on this machine.',
+      'Delete personal data?',
+    );
+    setView('launcher');
+    await run(() => uninstall(purge), 'Uninstalling…');
+  }
+
   async function handleReinstall() {
     if (!status?.installDir) return;
     const ok = await confirmDialog(
@@ -126,7 +143,17 @@ export default function App() {
   }
 
   if (view === 'settings') {
-    return <Settings onBack={() => setView('launcher')} />;
+    return (
+      <Settings
+        onBack={() => setView('launcher')}
+        installDir={status?.installDir ?? null}
+        installed={
+          status?.state.state === 'upToDate' ||
+          status?.state.state === 'updateAvailable'
+        }
+        onUninstall={handleUninstall}
+      />
+    );
   }
 
   const installed =

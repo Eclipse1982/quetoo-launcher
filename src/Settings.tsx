@@ -77,7 +77,14 @@ function CvarInput({ field, value, onChange }: {
   }
 }
 
-export default function Settings({ onBack }: { onBack: () => void }) {
+interface SettingsProps {
+  onBack: () => void;
+  installDir: string | null;
+  installed: boolean;
+  onUninstall: () => void;
+}
+
+export default function Settings({ onBack, installDir, installed, onUninstall }: SettingsProps) {
   const [settings, setSettings] = useState<QSettings | null>(null);
   const [status, setStatus] = useState('');
   const [capturing, setCapturing] = useState<string | null>(null); // command being rebound
@@ -206,6 +213,18 @@ export default function Settings({ onBack }: { onBack: () => void }) {
           })}
         </section>
       ))}
+
+      <section>
+        <h3>Danger zone</h3>
+        <p className="hint">
+          {installed
+            ? `Removes the game from ${installDir}. Your personal data is kept unless you choose otherwise.`
+            : 'Quetoo is not installed.'}
+        </p>
+        <button className="danger" disabled={!installed} onClick={onUninstall}>
+          Uninstall Quetoo
+        </button>
+      </section>
 
       <div className="settings-actions">
         <button onClick={handleReset}>Reset to defaults</button>
