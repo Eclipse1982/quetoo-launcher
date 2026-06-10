@@ -25,4 +25,4 @@ git tag v0.2.0 && git push && git push origin v0.2.0
 ```
 
 CI builds signed artifacts for Windows, macOS, and Linux and mirrors them to the
-public releases repo. See `docs/superpowers/specs/` for the design.
+public releases repo.

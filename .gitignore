@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# internal planning docs stay local-only
+docs/superpowers/
