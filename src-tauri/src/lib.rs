@@ -45,13 +45,17 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
     let cfg = Config::load(&config_path(&app)?)?;
     let release = fetch_latest_release(&http_client()).await?;
     let state = determine_state(&cfg, &release.tag_name);
+    let can_rollback = match &cfg.install_dir {
+        Some(dir) => snapshot::load_manifest(dir)?.is_some(),
+        None => false,
+    };
     Ok(StatusDto {
         install_dir: cfg.install_dir.map(|p| p.to_string_lossy().into_owned()),
         default_install_dir: config::default_install_dir(std::env::consts::OS)
             .map(|p| p.to_string_lossy().into_owned()),
         latest_version: release.tag_name,
         state,
-        can_rollback: false, // placeholder: snapshot rollback lands with the snapshot module
+        can_rollback,
     })
 }
 
@@ -68,7 +72,9 @@ async fn set_install_dir(
     Ok(())
 }
 
-/// Install (bundle) or update (small) Quetoo, then record the new version.
+/// Install or update official Quetoo. First install downloads the full
+/// bundle (engine + game data); afterwards the small update asset.
+/// Updates snapshot the files they overwrite so they can be rolled back.
 #[tauri::command]
 async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     let path = config_path(&app)?;
@@ -79,6 +85,8 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
         .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
 
     let client = http_client();
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
     let release = fetch_latest_release(&client).await?;
 
     // Bundle if we've never installed one; otherwise a small update.
@@ -87,28 +95,57 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     } else {
         AssetKind::Bundle
     };
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
     let asset = select_asset(&release, os, arch, kind)?.clone();
 
     std::fs::create_dir_all(&install_dir)?;
     let tmp = install_dir.join(format!(".{}", asset.name));
     installer::download_asset(&app, &client, &asset, &tmp).await?;
     let format = installer::detect_format(&asset.name)?;
-    let app2 = app.clone();
-    let extract_result = installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
-        let percent = installer::percent(done as u64, total as u64);
-        let detail = if total == 0 {
-            "Preparing\u{2026}".to_string()
+
+    // Snapshot before updates only — a failed snapshot aborts the update.
+    if kind == AssetKind::Update {
+        installer::emit_progress(&app, "snapshot", 0, "Backing up current version".into());
+        let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
+        let snap_result = if os == "macos" {
+            snapshot::create_snapshot_macos(&install_dir, &from, &release.tag_name).map(|_| ())
         } else {
-            format!("{done}/{total} files")
+            installer::list_entries(&tmp, format).and_then(|entries| {
+                snapshot::create_snapshot(&install_dir, &entries, &from, &release.tag_name)
+                    .map(|_| ())
+            })
         };
-        installer::emit_progress(&app2, "extract", percent, detail);
-    });
+        if let Err(e) = snap_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        installer::emit_progress(&app, "snapshot", 100, "Backup complete".into());
+    }
+
+    let app2 = app.clone();
+    let extract_result =
+        installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
+            let percent = installer::percent(done as u64, total as u64);
+            let detail = if total == 0 {
+                "Preparing\u{2026}".to_string()
+            } else {
+                format!("{done}/{total} files")
+            };
+            installer::emit_progress(&app2, "extract", percent, detail);
+        });
     let _ = std::fs::remove_file(&tmp);
     extract_result?;
 
-    // Commit version only on success.
+    // Verify the launch target exists before declaring success.
+    installer::emit_progress(&app, "verify", 50, "Verifying installation".into());
+    let target = launcher::executable_path(&install_dir, os)?;
+    if !target.exists() {
+        return Err(error::LauncherError::Extract(format!(
+            "install incomplete: {} missing",
+            target.display()
+        )));
+    }
+    installer::emit_progress(&app, "verify", 100, "Done".into());
+
     if kind == AssetKind::Bundle {
         cfg.bundle_installed = true;
     }
