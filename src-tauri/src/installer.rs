@@ -45,15 +45,25 @@ pub fn detect_format(file_name: &str) -> Result<ArchiveFormat> {
     }
 }
 
-/// Guard for destructive operations: true if `dir` is missing, empty, or
-/// looks like a Quetoo install (has bin/ or Quetoo.app). Protects against a
+/// True if wiping `dir` cannot destroy user data: missing, effectively empty
+/// (only launcher-owned artifacts: dot-prefixed download temps and `.rollback`),
+/// or a Quetoo layout (has `bin/` or `Quetoo.app`). Protects against a
 /// mis-pointed install dir being wiped by Reinstall.
-pub fn looks_like_quetoo_install(dir: &std::path::Path) -> crate::error::Result<bool> {
+pub fn is_safe_reinstall_target(dir: &std::path::Path) -> crate::error::Result<bool> {
     if !dir.exists() {
         return Ok(true);
     }
-    let mut entries = std::fs::read_dir(dir)?;
-    if entries.next().is_none() {
+    let mut has_other = false;
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let s = name.to_string_lossy();
+        // Dot-prefixed entries are launcher-owned: download temps (.quetoo-*.zip,
+        // .quetoo-*.tar.gz, etc.) and the rollback directory (.rollback).
+        if !s.starts_with('.') {
+            has_other = true;
+        }
+    }
+    if !has_other {
         return Ok(true);
     }
     Ok(dir.join("bin").exists() || dir.join("Quetoo.app").exists())
@@ -340,22 +350,55 @@ mod tests {
     #[test]
     fn sanity_missing_or_empty_dir_is_ok() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(looks_like_quetoo_install(&dir.path().join("nope")).unwrap());
-        assert!(looks_like_quetoo_install(dir.path()).unwrap());
+        assert!(is_safe_reinstall_target(&dir.path().join("nope")).unwrap());
+        assert!(is_safe_reinstall_target(dir.path()).unwrap());
     }
 
     #[test]
     fn sanity_quetoo_layout_is_ok() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("bin")).unwrap();
-        assert!(looks_like_quetoo_install(dir.path()).unwrap());
+        assert!(is_safe_reinstall_target(dir.path()).unwrap());
     }
 
     #[test]
     fn sanity_unrelated_dir_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("family-photos.txt"), "precious").unwrap();
-        assert!(!looks_like_quetoo_install(dir.path()).unwrap());
+        assert!(!is_safe_reinstall_target(dir.path()).unwrap());
+    }
+
+    /// A dir containing only launcher-owned artifacts (.rollback/ and a dot-prefixed
+    /// download temp) is safe to wipe — is_safe_reinstall_target must return true.
+    #[test]
+    fn launcher_artifacts_only_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        // .rollback/manifest.json  (the rollback directory)
+        let rollback = dir.path().join(".rollback");
+        std::fs::create_dir_all(&rollback).unwrap();
+        std::fs::write(rollback.join("manifest.json"), "{}").unwrap();
+        // .quetoo-x86_64-pc-windows.zip  (a download temp)
+        std::fs::write(
+            dir.path().join(".quetoo-x86_64-pc-windows.zip"),
+            b"partial",
+        )
+        .unwrap();
+        assert!(
+            is_safe_reinstall_target(dir.path()).unwrap(),
+            "dir with only launcher-owned dot-prefixed entries must be safe"
+        );
+    }
+
+    /// A Quetoo layout that also has a user file is still safe because bin/ is present.
+    #[test]
+    fn quetoo_layout_with_extra_user_file_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("my-save.txt"), "saves").unwrap();
+        assert!(
+            is_safe_reinstall_target(dir.path()).unwrap(),
+            "Quetoo layout (bin/ present) must be safe even with extra user files"
+        );
     }
 
     #[test]

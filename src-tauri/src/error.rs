@@ -20,6 +20,8 @@ pub enum LauncherError {
     Launch(String),
     #[error("rollback error: {0}")]
     Rollback(String),
+    #[error("{0}")]
+    Busy(String),
 }
 
 impl Serialize for LauncherError {

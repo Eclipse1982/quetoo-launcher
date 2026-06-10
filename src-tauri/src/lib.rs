@@ -84,7 +84,7 @@ fn ensure_game_not_running(install_dir: &std::path::Path, os: &str) -> Result<()
     if target.exists()
         && std::fs::OpenOptions::new().write(true).open(&target).is_err()
     {
-        return Err(error::LauncherError::Launch(
+        return Err(error::LauncherError::Busy(
             "Quetoo appears to be running — close the game and try again".into(),
         ));
     }
@@ -125,7 +125,10 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
 
     std::fs::create_dir_all(&install_dir)?;
     let tmp = install_dir.join(format!(".{}", asset.name));
-    installer::download_asset(&app, &client, &asset, &tmp).await?;
+    if let Err(e) = installer::download_asset(&app, &client, &asset, &tmp).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     let format = installer::detect_format(&asset.name)?;
 
     // Snapshot before updates only — a failed snapshot aborts the update.
@@ -196,6 +199,9 @@ async fn rollback_update(app: AppHandle) -> std::result::Result<(), error::Launc
         .install_dir
         .clone()
         .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+    // Preflight: rollback overwrites bin/quetoo.exe; a running game would die
+    // mid-restore with os error 32 (Windows file-locked).
+    ensure_game_not_running(&install_dir, std::env::consts::OS)?;
     let from_version = snapshot::rollback(&install_dir)?;
     cfg.installed_version = Some(from_version);
     cfg.save(&path)?;
@@ -215,12 +221,20 @@ async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherErr
     let os = std::env::consts::OS;
     ensure_game_not_running(&install_dir, os)?;
 
-    if !installer::looks_like_quetoo_install(&install_dir)? {
+    if !installer::is_safe_reinstall_target(&install_dir)? {
         return Err(error::LauncherError::Config(format!(
             "{} doesn't look like a Quetoo install; refusing to delete it",
             install_dir.display()
         )));
     }
+    // Reset config BEFORE the deletion loop: if a locked file interrupts the
+    // wipe mid-way, the config must already reflect NotInstalled so that a
+    // plain Install can self-heal. Saving config after a partial wipe would
+    // leave bundle_installed=true on a gutted tree, causing the sanity guard
+    // to refuse a retry.
+    cfg.installed_version = None;
+    cfg.bundle_installed = false;
+    cfg.save(&path)?;
     if install_dir.exists() {
         for entry in std::fs::read_dir(&install_dir)? {
             let p = entry?.path();
@@ -231,9 +245,6 @@ async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherErr
             }
         }
     }
-    cfg.installed_version = None;
-    cfg.bundle_installed = false;
-    cfg.save(&path)?;
     install_or_update(app).await
 }
 
