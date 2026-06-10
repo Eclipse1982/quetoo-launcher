@@ -130,6 +130,7 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some(version.into()),
             bundle_installed: true,
+            favorites: vec![],
         }
     }
 
@@ -185,6 +186,7 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some("v1.0.25".into()),
             bundle_installed: false,
+            favorites: vec![],
         };
         assert_eq!(determine_state(&cfg, "v1.0.25"), InstallState::NotInstalled);
     }

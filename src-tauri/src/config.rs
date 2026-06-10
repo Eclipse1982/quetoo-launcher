@@ -8,6 +8,8 @@ pub struct Config {
     pub installed_version: Option<String>,
     #[serde(default)]
     pub bundle_installed: bool,
+    #[serde(default)]
+    pub favorites: Vec<String>,
 }
 
 impl Config {
@@ -50,6 +52,18 @@ pub fn default_install_dir(os: &str) -> Option<PathBuf> {
     default_install_dir_from_env(os, &|k| std::env::var(k).ok())
 }
 
+/// Canonicalize a user-entered favorite server address: trim, append the
+/// default Quetoo port (:1998) when none is given, and require a parseable
+/// IPv4 socket address (hostnames are rejected for now).
+pub fn normalize_favorite(input: &str) -> Result<String> {
+    let s = input.trim();
+    let candidate = if s.contains(':') { s.to_string() } else { format!("{s}:1998") };
+    candidate
+        .parse::<std::net::SocketAddrV4>()
+        .map(|a| a.to_string())
+        .map_err(|_| LauncherError::Config(format!("not a valid server address: {input}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +85,7 @@ mod tests {
             install_dir: Some(PathBuf::from("/games/quetoo")),
             installed_version: Some("v1.0.25".into()),
             bundle_installed: true,
+            favorites: vec![],
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -134,5 +149,70 @@ mod tests {
     fn default_install_dir_freebsd_is_none_from_env() {
         let env = |_k: &str| None;
         assert!(default_install_dir_from_env("freebsd", &env).is_none());
+    }
+
+    // --- favorites field tests ---
+
+    #[test]
+    fn load_old_config_without_favorites_defaults_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // JSON that predates the favorites field — must still load cleanly.
+        std::fs::write(
+            &path,
+            r#"{"install_dir":null,"installed_version":null,"bundle_installed":false}"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.favorites, Vec::<String>::new());
+    }
+
+    #[test]
+    fn roundtrip_with_favorites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let cfg = Config {
+            install_dir: None,
+            installed_version: None,
+            bundle_installed: false,
+            favorites: vec!["1.2.3.4:1998".to_string()],
+        };
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.favorites, vec!["1.2.3.4:1998"]);
+        assert_eq!(loaded, cfg);
+    }
+
+    // --- normalize_favorite tests ---
+
+    #[test]
+    fn normalize_bare_ip_appends_default_port() {
+        assert_eq!(
+            normalize_favorite("144.202.77.138").unwrap(),
+            "144.202.77.138:1998"
+        );
+    }
+
+    #[test]
+    fn normalize_ip_with_port_trims_whitespace() {
+        assert_eq!(
+            normalize_favorite(" 1.2.3.4:27910 ").unwrap(),
+            "1.2.3.4:27910"
+        );
+    }
+
+    #[test]
+    fn normalize_garbage_returns_err() {
+        assert!(normalize_favorite("garbage").is_err());
+    }
+
+    #[test]
+    fn normalize_hostname_returns_err() {
+        assert!(normalize_favorite("play.example.com").is_err());
+    }
+
+    #[test]
+    fn normalize_non_numeric_port_returns_err() {
+        assert!(normalize_favorite("1.2.3.4:notaport").is_err());
     }
 }
