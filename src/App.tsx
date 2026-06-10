@@ -83,15 +83,18 @@ export default function App() {
 
   async function handleInstall() {
     if (!status) return;
-    if (!status.installDir) {
-      if (!status.defaultInstallDir) {
-        setMessage('No default install folder for this platform; choose one.');
-        setPhase('error');
-        return;
-      }
-      await setInstallDir(status.defaultInstallDir);
+    const dir = status.installDir ?? status.defaultInstallDir;
+    if (!dir) {
+      setMessage('No default install folder for this platform; choose one.');
+      setPhase('error');
+      return;
     }
-    await run(installOrUpdate, 'Starting…');
+    // Set the dir inside run() so it's covered by the error view and the
+    // working phase blocks a second click during the IPC round-trip.
+    await run(async () => {
+      if (!status.installDir) await setInstallDir(dir);
+      await installOrUpdate();
+    }, 'Starting…');
   }
 
   async function handleReinstall() {
@@ -192,7 +195,11 @@ export default function App() {
               ))}
           </p>
           <button onClick={handleChooseDir}>
-            {status.installDir ? 'Change install folder' : 'Choose a different folder'}
+            {status.installDir
+              ? 'Change install folder'
+              : status.defaultInstallDir
+                ? 'Choose a different folder'
+                : 'Choose install folder'}
           </button>
 
           {status.state.state === 'notInstalled' ? (
