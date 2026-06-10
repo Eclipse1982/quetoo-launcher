@@ -32,8 +32,10 @@ fn http_client() -> reqwest::Client {
 #[serde(rename_all = "camelCase")]
 struct StatusDto {
     install_dir: Option<String>,
+    default_install_dir: Option<String>,
     latest_version: String,
     state: InstallState,
+    can_rollback: bool,
 }
 
 /// Check GitHub and return the current launcher status.
@@ -44,8 +46,11 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
     let state = determine_state(&cfg, &release.tag_name);
     Ok(StatusDto {
         install_dir: cfg.install_dir.map(|p| p.to_string_lossy().into_owned()),
+        default_install_dir: config::default_install_dir(std::env::consts::OS)
+            .map(|p| p.to_string_lossy().into_owned()),
         latest_version: release.tag_name,
         state,
+        can_rollback: false,
     })
 }
 

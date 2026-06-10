@@ -32,6 +32,18 @@ impl Config {
     }
 }
 
+/// Platform default install directory, offered when no install_dir is configured.
+/// The user can always pick a different folder; this is only the pre-filled value.
+pub fn default_install_dir(os: &str) -> Option<PathBuf> {
+    match os {
+        "windows" => Some(PathBuf::from(r"C:\Games\Quetoo")),
+        "linux" => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".local").join("share").join("quetoo")),
+        "macos" => std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications")),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +69,18 @@ mod tests {
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn default_install_dir_windows() {
+        assert_eq!(
+            default_install_dir("windows").unwrap(),
+            PathBuf::from(r"C:\Games\Quetoo")
+        );
+    }
+
+    #[test]
+    fn default_install_dir_unsupported_is_none() {
+        assert!(default_install_dir("freebsd").is_none());
     }
 }
