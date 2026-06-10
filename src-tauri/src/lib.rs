@@ -1,3 +1,4 @@
+mod browser;
 mod config;
 mod error;
 mod github;
@@ -327,6 +328,124 @@ fn default_quetoo_settings() -> qconfig::Settings {
     qconfig::Settings::defaults()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerList {
+    servers: Vec<browser::ServerInfo>,
+    master_ok: bool,
+}
+
+/// Query the master server and all favorites concurrently.
+#[tauri::command]
+async fn get_servers(app: AppHandle) -> std::result::Result<ServerList, error::LauncherError> {
+    use std::collections::HashSet;
+    use std::net::SocketAddrV4;
+
+    let cfg = Config::load(&config_path(&app)?)?;
+
+    // Collect favorite addresses (skip unparseable ones silently).
+    let favorite_addrs: HashSet<SocketAddrV4> = cfg
+        .favorites
+        .iter()
+        .filter_map(|s| s.parse::<SocketAddrV4>().ok())
+        .collect();
+
+    // Probe favorites immediately — they must not wait out a dead master's
+    // 1500ms timeout (that's the exact case master_ok exists for).
+    let mut handles: Vec<_> = favorite_addrs
+        .iter()
+        .copied()
+        .map(|addr| tokio::spawn(async move { browser::probe_server(addr, true).await }))
+        .collect();
+
+    let (master_addrs, master_ok) = match browser::fetch_master_list().await {
+        Ok(list) => (list, true),
+        Err(_) => (Vec::new(), false),
+    };
+
+    // Probe master-only addresses (favorites already in flight = dedupe).
+    let master_only: HashSet<SocketAddrV4> = master_addrs
+        .into_iter()
+        .filter(|a| !favorite_addrs.contains(a))
+        .collect();
+    handles.extend(
+        master_only
+            .into_iter()
+            .map(|addr| tokio::spawn(async move { browser::probe_server(addr, false).await })),
+    );
+
+    let mut servers: Vec<browser::ServerInfo> = Vec::new();
+    for handle in handles {
+        // Defensively handle panicked probe tasks — they must not poison the command.
+        match handle.await {
+            Ok(Some(info)) => servers.push(info),
+            Ok(None) => {}
+            Err(_) => {} // task panicked — skip
+        }
+    }
+
+    // Ping ascending with a stable addr tiebreak so equal-ping rows (e.g. two
+    // dead favorites at 999) don't swap places on every auto-refresh.
+    servers.sort_by(|a, b| a.ping.cmp(&b.ping).then_with(|| a.addr.cmp(&b.addr)));
+
+    Ok(ServerList { servers, master_ok })
+}
+
+/// Launch the installed game connected to the given server address.
+#[tauri::command]
+async fn join_server(
+    app: AppHandle,
+    addr: String,
+) -> std::result::Result<(), error::LauncherError> {
+    let cfg = Config::load(&config_path(&app)?)?;
+    let install_dir = cfg
+        .install_dir
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+    if !cfg.bundle_installed {
+        return Err(error::LauncherError::Launch(
+            "Quetoo is not installed".into(),
+        ));
+    }
+    // Validate that addr parses as a SocketAddrV4.
+    addr.parse::<std::net::SocketAddrV4>()
+        .map_err(|_| error::LauncherError::Config(format!("not a valid server address: {addr}")))?;
+    launcher::launch_with_args(&install_dir, &["+connect", &addr])
+}
+
+/// Add a server address to the favorites list.
+#[tauri::command]
+async fn add_favorite(
+    app: AppHandle,
+    addr: String,
+) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let normalized = config::normalize_favorite(&addr)?;
+    if !cfg.favorites.contains(&normalized) {
+        cfg.favorites.push(normalized);
+        cfg.save(&path)?;
+    }
+    Ok(())
+}
+
+/// Remove a server address from the favorites list.
+#[tauri::command]
+async fn remove_favorite(
+    app: AppHandle,
+    addr: String,
+) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    // Match the exact stored string, or the normalized form for round-trip safety.
+    let normalized = config::normalize_favorite(&addr).unwrap_or_else(|_| addr.clone());
+    let before = cfg.favorites.len();
+    cfg.favorites.retain(|s| s != &addr && s != &normalized);
+    if cfg.favorites.len() != before {
+        cfg.save(&path)?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -344,7 +463,11 @@ pub fn run() {
             play,
             get_quetoo_settings,
             save_quetoo_settings,
-            default_quetoo_settings
+            default_quetoo_settings,
+            get_servers,
+            join_server,
+            add_favorite,
+            remove_favorite
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
