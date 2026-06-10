@@ -1,3 +1,29 @@
+export interface PlayerInfo {
+  name: string;
+  score: number;
+  ping: number;
+  bot: boolean;
+}
+
+export interface ServerInfo {
+  addr: string;
+  hostname: string;
+  map: string;
+  gameplay: string;
+  clients: number;
+  bots: number;
+  maxClients: number;
+  ping: number;
+  protocol: number;
+  favorite: boolean;
+  players: PlayerInfo[];
+}
+
+export interface ServerList {
+  servers: ServerInfo[];
+  masterOk: boolean;
+}
+
 export type InstallState =
   | { state: 'notInstalled' }
   | { state: 'updateAvailable'; from: string; to: string }

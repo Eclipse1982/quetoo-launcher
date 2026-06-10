@@ -5,6 +5,7 @@ import {
   confirmDialog,
   getStatus,
   installOrUpdate,
+  joinServer,
   onInstallProgress,
   play,
   reinstall,
@@ -15,6 +16,7 @@ import {
 } from './api';
 import type { InstallPhase, Status } from './types';
 import Settings from './Settings';
+import ServerBrowser from './ServerBrowser';
 import './styles.css';
 
 type Phase = 'loading' | 'idle' | 'working' | 'error';
@@ -32,7 +34,7 @@ export default function App() {
   const [message, setMessage] = useState<string>('Checking for updates…');
   const [percent, setPercent] = useState<number>(0);
   const [detail, setDetail] = useState<string>('');
-  const [view, setView] = useState<'launcher' | 'settings'>('launcher');
+  const [view, setView] = useState<'launcher' | 'settings' | 'servers'>('launcher');
   const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
 
@@ -133,6 +135,21 @@ export default function App() {
     await run(rollbackUpdate, 'Rolling back…');
   }
 
+  async function handleJoin(addr: string) {
+    if (installed) {
+      try {
+        await joinServer(addr);
+      } catch (e) {
+        setMessage(String(e));
+        setPhase('error');
+        setView('launcher');
+      }
+    } else {
+      setView('launcher');
+      await handleInstall();
+    }
+  }
+
   async function handlePlay() {
     try {
       await play();
@@ -142,22 +159,29 @@ export default function App() {
     }
   }
 
+  const installed =
+    status?.state.state === 'upToDate' || status?.state.state === 'updateAvailable';
+
   if (view === 'settings') {
     return (
       <Settings
         onBack={() => setView('launcher')}
         installDir={status?.installDir ?? null}
-        installed={
-          status?.state.state === 'upToDate' ||
-          status?.state.state === 'updateAvailable'
-        }
+        installed={installed}
         onUninstall={handleUninstall}
       />
     );
   }
 
-  const installed =
-    status?.state.state === 'upToDate' || status?.state.state === 'updateAvailable';
+  if (view === 'servers') {
+    return (
+      <ServerBrowser
+        onBack={() => setView('launcher')}
+        installed={installed}
+        onJoin={handleJoin}
+      />
+    );
+  }
 
   return (
     <main className="app">
@@ -186,6 +210,14 @@ export default function App() {
           <img src="/quetoo-logo.png" alt="Quetoo" className="logo" />
           {/* Disabled while an operation runs: Settings hosts Uninstall, which
               must never start concurrently with an in-flight install. */}
+          <button
+            className="gear"
+            disabled={phase === 'working'}
+            onClick={() => setView('servers')}
+            title="Server Browser"
+          >
+            Servers
+          </button>
           <button
             className="gear"
             disabled={phase === 'working'}
