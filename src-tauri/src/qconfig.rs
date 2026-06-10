@@ -8,19 +8,27 @@ use std::path::PathBuf;
 /// Pure path builder mirroring SDL_GetPrefPath("WickedOldGames", "Quetoo").
 /// `env` returns the value of an environment variable, if set.
 fn user_dir_from_env(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf> {
+    // Empty env values are treated as unset everywhere: this path feeds
+    // remove_dir_all (uninstall), and an empty base would yield a relative
+    // path resolved against the CWD.
     let base = match os {
         "windows" => env("APPDATA")
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| LauncherError::Config("APPDATA not set".into()))?,
         "macos" => {
-            let home = env("HOME").ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
+            let home = env("HOME")
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
             PathBuf::from(home).join("Library").join("Application Support")
         }
         "linux" => {
             if let Some(xdg) = env("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
                 PathBuf::from(xdg)
             } else {
-                let home = env("HOME").ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
+                let home = env("HOME")
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
                 PathBuf::from(home).join(".local").join("share")
             }
         }
@@ -187,12 +195,15 @@ pub fn parse_settings(text: &str) -> Settings {
 
 // ── Section D — round-trip write + load/save ──────────────────────────────────
 
-/// Quote a token for writing if it is empty or contains whitespace.
+/// Quote a token for writing if it is empty or contains whitespace. Embedded
+/// double quotes are stripped — cfg syntax has no escape for them, and a raw
+/// `"` inside a value would corrupt tokenization of the rendered line.
 fn quote_if_needed(s: &str) -> String {
+    let s = s.replace('"', "");
     if s.is_empty() || s.chars().any(|c| c.is_whitespace()) {
         format!("\"{s}\"")
     } else {
-        s.to_string()
+        s
     }
 }
 
@@ -461,5 +472,105 @@ mod tests {
         // Unbound-by-default actions aren't written, so they parse as defaults
         // (empty) — full equality must still hold.
         assert_eq!(parsed, d);
+    }
+
+    // ── Fix 1: empty-string env vars treated as "not set" ────────────────────
+
+    #[test]
+    fn windows_empty_appdata_is_err() {
+        // APPDATA="" must error, not produce a relative path resolved against CWD.
+        let env = env_with(&[("APPDATA", "")]);
+        let err = user_dir_from_env("windows", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("APPDATA"),
+            "expected APPDATA error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn macos_empty_home_is_err() {
+        let env = env_with(&[("HOME", "")]);
+        let err = user_dir_from_env("macos", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("HOME"), "expected HOME error, got: {msg}");
+    }
+
+    #[test]
+    fn linux_empty_home_fallback_is_err() {
+        // XDG_DATA_HOME unset; HOME="" → should error, not produce a relative path.
+        let env = env_with(&[("HOME", "")]);
+        let err = user_dir_from_env("linux", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("HOME"), "expected HOME error, got: {msg}");
+    }
+
+    #[test]
+    fn linux_empty_xdg_falls_through_to_home() {
+        // XDG_DATA_HOME="" must be treated as unset and fall back to HOME.
+        let env = env_with(&[("XDG_DATA_HOME", ""), ("HOME", "/home/j")]);
+        let p = user_dir_from_env("linux", &env).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/home/j/.local/share/WickedOldGames/Quetoo")
+        );
+    }
+
+    // ── Fix 2: embedded quotes in cvar values are stripped ───────────────────
+
+    #[test]
+    fn quote_if_needed_strips_embedded_double_quotes() {
+        // A value containing an embedded " must have it stripped so the rendered
+        // line tokenizes cleanly without corrupting subsequent parsing.
+        let rendered = quote_if_needed("Ja\"mes");
+        assert_eq!(rendered, "James");
+    }
+
+    #[test]
+    fn quote_if_needed_only_quotes_becomes_empty_string() {
+        // A value that is nothing but quotes becomes "" (quoted empty).
+        let rendered = quote_if_needed("\"\"");
+        assert_eq!(rendered, "\"\"");
+    }
+
+    #[test]
+    fn cvar_value_with_embedded_quote_roundtrips() {
+        // Setting name to `Ja"mes` should render and re-parse without corruption.
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes".into());
+        let text = render_autoexec("", &s);
+        // The rendered line must not contain the raw embedded quote.
+        assert!(
+            !text.contains("\"mes"),
+            "embedded quote leaked into rendered output: {text}"
+        );
+        // The line must parse back to a sane value (stripped form).
+        let parsed = parse_settings(&text);
+        let name_val = parsed.cvars.get("name").unwrap();
+        assert_eq!(name_val, "James");
+    }
+
+    #[test]
+    fn cvar_value_with_quote_and_spaces_roundtrips() {
+        // `Ja"mes Smith` → strip " → `James Smith` → quoted because of space.
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes Smith".into());
+        let text = render_autoexec("", &s);
+        assert!(!text.contains("\"mes"), "embedded quote leaked: {text}");
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.cvars.get("name").unwrap(), "James Smith");
+    }
+
+    #[test]
+    fn quote_stripping_does_not_corrupt_following_lines() {
+        // Verify that a name with embedded quotes doesn't break parsing of
+        // subsequent lines (the classic re-tokenization failure).
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes".into());
+        s.cvars.insert("cg_fov".into(), "100".into());
+        let text = render_autoexec("", &s);
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.cvars.get("cg_fov").unwrap(), "100",
+            "following cvar corrupted by name with embedded quote; rendered:\n{text}");
     }
 }
