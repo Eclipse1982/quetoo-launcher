@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { addFavorite, getServers, removeFavorite } from './api';
 import type { ServerInfo } from './types';
 
 const QUETOO_PROTOCOL = 2027;
 
-type SortCol = 'favorite' | 'hostname' | 'map' | 'gameplay' | 'players' | 'ping';
+type SortCol = 'hostname' | 'map' | 'gameplay' | 'players' | 'ping';
 type SortDir = 'asc' | 'desc';
 
 interface ServerBrowserProps {
@@ -30,7 +30,6 @@ function sortServers(servers: ServerInfo[], col: SortCol, dir: SortDir): ServerI
       case 'gameplay': v = cmp(a.gameplay.toLowerCase(), b.gameplay.toLowerCase()); break;
       case 'players':  v = cmp(a.clients, b.clients); break;
       case 'ping':     v = cmp(a.ping, b.ping); break;
-      default:         v = 0;
     }
     return dir === 'asc' ? v : -v;
   });
@@ -48,22 +47,26 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
   const [search, setSearch] = useState('');
   const [ipInput, setIpInput] = useState('');
   const [expandedAddr, setExpandedAddr] = useState<string | null>(null);
-  const refreshingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const inflightRef = useRef<Promise<void> | null>(null);
 
-  async function refresh() {
-    if (refreshingRef.current) return;
-    refreshingRef.current = true;
-    setLoading(true);
-    try {
-      const result = await getServers();
-      setServers(result.servers);
-      setMasterOk(result.masterOk);
-    } catch {
-      // leave existing list; errors surfaced via masterOk banner or empty state
-    } finally {
-      setLoading(false);
-      refreshingRef.current = false;
-    }
+  function refresh(): Promise<void> {
+    if (inflightRef.current) return inflightRef.current;
+    const p = (async () => {
+      setLoading(true);
+      try {
+        const result = await getServers();
+        setServers(result.servers);
+        setMasterOk(result.masterOk);
+      } catch {
+        // leave existing list; errors surfaced via masterOk banner or empty state
+      } finally {
+        setLoading(false);
+        inflightRef.current = null;
+      }
+    })();
+    inflightRef.current = p;
+    return p;
   }
 
   useEffect(() => {
@@ -82,22 +85,40 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
     }
   }
 
+  async function refreshAfterMutation() {
+    // If a refresh is already in flight, wait for it to finish first,
+    // then kick off a fresh one so callers see up-to-date data.
+    if (inflightRef.current) await inflightRef.current;
+    await refresh();
+  }
+
   async function handleAddFavorite() {
     const addr = ipInput.trim();
     if (!addr) return;
-    await addFavorite(addr);
-    setIpInput('');
-    await refresh();
+    setError(null);
+    try {
+      await addFavorite(addr);
+      setIpInput('');
+      await refreshAfterMutation();
+    } catch (e) {
+      setError(String(e));
+      // intentionally keep ipInput so the user can correct it
+    }
   }
 
   async function handleToggleFavorite(e: React.MouseEvent, server: ServerInfo) {
     e.stopPropagation();
-    if (server.favorite) {
-      await removeFavorite(server.addr);
-    } else {
-      await addFavorite(server.addr);
+    setError(null);
+    try {
+      if (server.favorite) {
+        await removeFavorite(server.addr);
+      } else {
+        await addFavorite(server.addr);
+      }
+      await refreshAfterMutation();
+    } catch (err) {
+      setError(String(err));
     }
-    await refresh();
   }
 
   function handleRowClick(addr: string) {
@@ -136,7 +157,7 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
       <div className="sb-header">
         <button onClick={onBack}>← Back</button>
         <h2>Servers</h2>
-        <button onClick={refresh} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
+        <button onClick={() => { setError(null); refresh(); }} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
       </div>
 
       {!masterOk && (
@@ -171,6 +192,8 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
         />
       </div>
 
+      {error && <div className="sb-banner error">{error}</div>}
+
       {loading && servers.length === 0 && <p className="status">Refreshing…</p>}
       {!loading && displayed.length === 0 && <p className="status">No servers found.</p>}
 
@@ -179,9 +202,7 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
           <table className="sb-table">
             <thead>
               <tr>
-                <th className="col-star" onClick={() => handleSort('favorite')} title="Favorite">
-                  ★{sortIndicator('favorite')}
-                </th>
+                <th className="col-star" title="Favorite">★</th>
                 <th className="col-server" onClick={() => handleSort('hostname')}>
                   Server{sortIndicator('hostname')}
                 </th>
@@ -206,7 +227,7 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
                 const dead = isDead(s);
                 const dim = mismatch || dead;
                 const expanded = expandedAddr === s.addr;
-                const joinDisabled = dead || mismatch || (!installed);
+                const joinDisabled = dead || mismatch;
 
                 let joinTitle: string | undefined;
                 if (mismatch) joinTitle = 'different game version';
@@ -222,9 +243,8 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
                 const pingCell = dead ? '—' : String(s.ping);
 
                 return (
-                  <>
+                  <Fragment key={s.addr}>
                     <tr
-                      key={s.addr}
                       className={dim ? 'dim' : ''}
                       onClick={() => handleRowClick(s.addr)}
                     >
@@ -257,7 +277,7 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
                       </td>
                     </tr>
                     {expanded && (
-                      <tr key={`${s.addr}-players`} className="sb-players-row">
+                      <tr className="sb-players-row">
                         <td colSpan={7}>
                           {s.players.length === 0 ? (
                             <em className="sb-no-players">No players</em>
@@ -284,7 +304,7 @@ export default function ServerBrowser({ onBack, installed, onJoin }: ServerBrows
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
             </tbody>
