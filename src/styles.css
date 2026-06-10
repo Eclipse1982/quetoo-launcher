@@ -32,6 +32,8 @@ button {
   background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.9rem;
 }
 button:hover { background: #262932; }
+button:disabled { opacity: 0.5; cursor: default; }
+button:disabled:hover { background: var(--surface); }
 button.primary {
   background: var(--accent); border-color: var(--accent); color: #04110e; font-weight: 700;
 }

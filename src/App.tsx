@@ -184,7 +184,14 @@ export default function App() {
         )}
         <header className="brand">
           <img src="/quetoo-logo.png" alt="Quetoo" className="logo" />
-          <button className="gear" onClick={() => setView('settings')} title="Settings">
+          {/* Disabled while an operation runs: Settings hosts Uninstall, which
+              must never start concurrently with an in-flight install. */}
+          <button
+            className="gear"
+            disabled={phase === 'working'}
+            onClick={() => setView('settings')}
+            title="Settings"
+          >
             ⚙ Settings
           </button>
         </header>
