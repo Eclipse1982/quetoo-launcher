@@ -53,15 +53,24 @@ pub fn default_install_dir(os: &str) -> Option<PathBuf> {
 }
 
 /// Canonicalize a user-entered favorite server address: trim, append the
-/// default Quetoo port (:1998) when none is given, and require a parseable
-/// IPv4 socket address (hostnames are rejected for now).
+/// default Quetoo port when none is given, and require a parseable IPv4
+/// socket address with a non-zero port (hostnames are rejected for now).
 pub fn normalize_favorite(input: &str) -> Result<String> {
     let s = input.trim();
-    let candidate = if s.contains(':') { s.to_string() } else { format!("{s}:1998") };
-    candidate
+    let candidate = if s.contains(':') {
+        s.to_string()
+    } else {
+        format!("{s}:{}", crate::browser::DEFAULT_SERVER_PORT)
+    };
+    let addr = candidate
         .parse::<std::net::SocketAddrV4>()
-        .map(|a| a.to_string())
-        .map_err(|_| LauncherError::Config(format!("not a valid server address: {input}")))
+        .map_err(|_| LauncherError::Config(format!("not a valid server address: {input}")))?;
+    if addr.port() == 0 {
+        return Err(LauncherError::Config(format!(
+            "not a valid server address: {input}"
+        )));
+    }
+    Ok(addr.to_string())
 }
 
 #[cfg(test)]
@@ -214,5 +223,10 @@ mod tests {
     #[test]
     fn normalize_non_numeric_port_returns_err() {
         assert!(normalize_favorite("1.2.3.4:notaport").is_err());
+    }
+
+    #[test]
+    fn normalize_port_zero_returns_err() {
+        assert!(normalize_favorite("1.2.3.4:0").is_err());
     }
 }

@@ -69,10 +69,10 @@ pub struct StatusInfo {
 // ── Pure builders ─────────────────────────────────────────────────────────────
 
 /// Build the UDP packet sent to the master server.
-/// Bytes: `\xFF\xFF\xFF\xFF` + `getservers 2027`
+/// Bytes: `\xFF\xFF\xFF\xFF` + `getservers <QUETOO_PROTOCOL>`
 pub fn master_request() -> Vec<u8> {
     let mut pkt = OOB.to_vec();
-    pkt.extend_from_slice(b"getservers 2027");
+    pkt.extend_from_slice(format!("getservers {QUETOO_PROTOCOL}").as_bytes());
     pkt
 }
 
@@ -636,5 +636,27 @@ mod tests {
     #[test]
     fn dead_server_non_favorite_returns_none() {
         assert!(dead_server_or_none("1.2.3.4:1998".into(), false).is_none());
+    }
+
+    // ── parse_status_response: empty player name (spec §5) ───────────────────
+
+    /// A player line with an empty name ("\\score\\5\\ping\\20\\name\\") must parse
+    /// successfully with name == "" and be counted as a human client.
+    #[test]
+    fn parse_status_response_player_empty_name_is_counted() {
+        let body = concat!(
+            "status\n",
+            "\\sv_hostname\\Test\\sv_map\\dm1\\g_gameplay\\dm\\sv_max_clients\\8\\sv_protocol\\2027\n",
+            "\\score\\5\\ping\\20\\name\\\n",
+        );
+        let buf = make_status_buf(body);
+        let info = parse_status_response(&buf).unwrap();
+        assert_eq!(info.players.len(), 1);
+        assert_eq!(info.players[0].name, "");
+        assert_eq!(info.players[0].score, 5);
+        assert_eq!(info.players[0].ping, 20);
+        assert!(!info.players[0].bot);
+        assert_eq!(info.clients, 1);
+        assert_eq!(info.bots, 0);
     }
 }
