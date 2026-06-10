@@ -73,6 +73,24 @@ async fn set_install_dir(
     Ok(())
 }
 
+/// Pre-flight guard: on non-macOS, check that the game executable is not
+/// currently held open (which would cause cryptic os error 32 mid-extract).
+/// Returns `Launch` error if the game appears to be running.
+fn ensure_game_not_running(install_dir: &std::path::Path, os: &str) -> Result<()> {
+    if os == "macos" {
+        return Ok(());
+    }
+    let target = launcher::executable_path(install_dir, os)?;
+    if target.exists()
+        && std::fs::OpenOptions::new().write(true).open(&target).is_err()
+    {
+        return Err(error::LauncherError::Launch(
+            "Quetoo appears to be running — close the game and try again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Install or update official Quetoo. First install downloads the full
 /// bundle (engine + game data); afterwards the small update asset.
 /// Updates snapshot the files they overwrite so they can be rolled back.
@@ -101,17 +119,8 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     // Pre-flight: on non-macOS, refuse to update if the executable is locked
     // (Windows holds running executables open). Checked before any download so
     // nothing is touched on failure.
-    if kind == AssetKind::Update && os != "macos" {
-        let target = launcher::executable_path(&install_dir, os)?;
-        if target.exists() {
-            // Windows holds running executables open; a locked exe would
-            // otherwise fail mid-extract with a cryptic os error 32.
-            if std::fs::OpenOptions::new().write(true).open(&target).is_err() {
-                return Err(error::LauncherError::Launch(
-                    "Quetoo appears to be running — close the game and try again".into(),
-                ));
-            }
-        }
+    if kind == AssetKind::Update {
+        ensure_game_not_running(&install_dir, os)?;
     }
 
     std::fs::create_dir_all(&install_dir)?;
@@ -178,6 +187,56 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     Ok(())
 }
 
+/// Restore the previous version from the pre-update snapshot.
+#[tauri::command]
+async fn rollback_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let install_dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+    let from_version = snapshot::rollback(&install_dir)?;
+    cfg.installed_version = Some(from_version);
+    cfg.save(&path)?;
+    Ok(())
+}
+
+/// Wipe the install directory and re-download the full bundle.
+#[tauri::command]
+async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let install_dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+
+    let os = std::env::consts::OS;
+    ensure_game_not_running(&install_dir, os)?;
+
+    if !installer::looks_like_quetoo_install(&install_dir)? {
+        return Err(error::LauncherError::Config(format!(
+            "{} doesn't look like a Quetoo install; refusing to delete it",
+            install_dir.display()
+        )));
+    }
+    if install_dir.exists() {
+        for entry in std::fs::read_dir(&install_dir)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+        }
+    }
+    cfg.installed_version = None;
+    cfg.bundle_installed = false;
+    cfg.save(&path)?;
+    install_or_update(app).await
+}
+
 /// Launch the installed game.
 #[tauri::command]
 async fn play(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
@@ -219,6 +278,8 @@ pub fn run() {
             get_status,
             set_install_dir,
             install_or_update,
+            rollback_update,
+            reinstall,
             play,
             get_quetoo_settings,
             save_quetoo_settings,

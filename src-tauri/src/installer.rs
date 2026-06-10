@@ -45,6 +45,20 @@ pub fn detect_format(file_name: &str) -> Result<ArchiveFormat> {
     }
 }
 
+/// Guard for destructive operations: true if `dir` is missing, empty, or
+/// looks like a Quetoo install (has bin/ or Quetoo.app). Protects against a
+/// mis-pointed install dir being wiped by Reinstall.
+pub fn looks_like_quetoo_install(dir: &std::path::Path) -> crate::error::Result<bool> {
+    if !dir.exists() {
+        return Ok(true);
+    }
+    let mut entries = std::fs::read_dir(dir)?;
+    if entries.next().is_none() {
+        return Ok(true);
+    }
+    Ok(dir.join("bin").exists() || dir.join("Quetoo.app").exists())
+}
+
 /// True if `rel` escapes the install dir or touches the reserved .rollback
 /// area: empty, absolute, drive-prefixed, any `..`, or whose first
 /// non-`.` component is `.rollback` (ASCII case-insensitive — NTFS).
@@ -322,6 +336,27 @@ fn tempfile_mount(archive: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanity_missing_or_empty_dir_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(looks_like_quetoo_install(&dir.path().join("nope")).unwrap());
+        assert!(looks_like_quetoo_install(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn sanity_quetoo_layout_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        assert!(looks_like_quetoo_install(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn sanity_unrelated_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("family-photos.txt"), "precious").unwrap();
+        assert!(!looks_like_quetoo_install(dir.path()).unwrap());
+    }
 
     #[test]
     fn detects_formats() {
