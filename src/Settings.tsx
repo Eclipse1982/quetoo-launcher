@@ -27,7 +27,7 @@ function eventToKey(e: KeyboardEvent): string {
     Escape: 'escape',
   };
   if (e.key in map) return map[e.key];
-  return e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+  return e.key.toLowerCase();
 }
 
 function groupBy<T>(items: T[], key: (t: T) => string): [string, T[]][] {
@@ -47,7 +47,7 @@ function CvarInput({ field, value, onChange }: {
   switch (f.kind) {
     case 'checkbox':
       return (
-        <input type="checkbox" checked={value === '1'}
+        <input type="checkbox" checked={(parseFloat(value) || 0) !== 0}
           onChange={(e) => onChange(e.target.checked ? '1' : '0')} />
       );
     case 'slider':
@@ -98,11 +98,13 @@ export default function Settings({ onBack }: { onBack: () => void }) {
 
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
-      // Escape cancels the rebind instead of binding the Escape key.
-      if (e.key !== 'Escape') {
-        finish(eventToKey(e));
-      } else {
+      // Backspace/Delete clears the bind; Escape cancels without clearing.
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        finish('');
+      } else if (e.key === 'Escape') {
         setCapturing(null);
+      } else {
+        finish(eventToKey(e));
       }
     };
     const onMouse = (e: MouseEvent) => {
@@ -111,6 +113,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      if (e.deltaY === 0) return;
       // exact Quetoo key names
       finish(e.deltaY > 0 ? 'mouse wheel down' : 'mouse wheel up');
     };
@@ -167,16 +170,16 @@ export default function Settings({ onBack }: { onBack: () => void }) {
       {cvarGroups.map(([section, fields]) => (
         <section key={section}>
           <h3>{section}</h3>
-          {fields.map(({ cvar, label, hint, field }) => (
-            <label key={cvar} className="row">
+          {fields.map((f) => (
+            <label key={f.cvar} className="row">
               <span>
-                {label}
-                {hint && <span className="hint"> {hint}</span>}
+                {f.label}
+                {f.hint && <span className="hint"> {f.hint}</span>}
               </span>
               <CvarInput
-                field={{ cvar, label, section, field, hint }}
-                value={settings.cvars[cvar] ?? ''}
-                onChange={(v) => setCvar(cvar, v)}
+                field={f}
+                value={settings.cvars[f.cvar] ?? ''}
+                onChange={(v) => setCvar(f.cvar, v)}
               />
             </label>
           ))}
@@ -185,7 +188,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
 
       {bindGroups.map(([section, fields]) => (
         <section key={section}>
-          <h3>{section}</h3>
+          <h3>{section} <span className="hint">click a key, then press a key to bind — Backspace clears, Esc cancels</span></h3>
           {fields.map(({ command, label }) => {
             const boundKey = settings.bindings[command] ?? '';
             return (

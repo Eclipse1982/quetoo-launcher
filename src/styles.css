@@ -57,6 +57,8 @@ button.play { background: var(--accent); border-color: var(--accent); color: #04
   background: var(--bg); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 5px 8px; width: 180px;
 }
+.row input[type=checkbox], .row input[type=range] { width: auto; padding: 0; background: none; border: none; }
+.slider-wrap input[type=range] { width: 140px; }
 button.key { min-width: 120px; }
 button.key.capturing { border-color: var(--accent); color: var(--accent); }
 .settings-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
