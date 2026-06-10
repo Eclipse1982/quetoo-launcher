@@ -90,7 +90,17 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     let arch = std::env::consts::ARCH;
     let asset = select_asset(&release, os, arch, kind)?.clone();
 
-    installer::download_and_install(&app, &client, &asset, &install_dir).await?;
+    std::fs::create_dir_all(&install_dir)?;
+    let tmp = install_dir.join(format!(".{}", asset.name));
+    installer::download_asset(&app, &client, &asset, &tmp).await?;
+    let format = installer::detect_format(&asset.name)?;
+    let app2 = app.clone();
+    let extract_result = installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
+        let percent = if total > 0 { (done * 100 / total) as u8 } else { 0 };
+        installer::emit_progress(&app2, "extract", percent, format!("{done}/{total} files"));
+    });
+    let _ = std::fs::remove_file(&tmp);
+    extract_result?;
 
     // Commit version only on success.
     if kind == AssetKind::Bundle {
