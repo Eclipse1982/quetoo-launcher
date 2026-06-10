@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   BIND_FIELDS,
   CVAR_FIELDS,
+  type CvarField,
   type Settings as QSettings,
 } from './types';
 import {
@@ -26,10 +27,64 @@ function eventToKey(e: KeyboardEvent): string {
     Escape: 'escape',
   };
   if (e.key in map) return map[e.key];
-  return e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+  return e.key.toLowerCase();
 }
 
-export default function Settings({ onBack }: { onBack: () => void }) {
+function groupBy<T>(items: T[], key: (t: T) => string): [string, T[]][] {
+  const m = new Map<string, T[]>();
+  for (const it of items) {
+    const k = key(it);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k)!.push(it);
+  }
+  return [...m.entries()];
+}
+
+function CvarInput({ field, value, onChange }: {
+  field: CvarField; value: string; onChange: (v: string) => void;
+}) {
+  const f = field.field;
+  switch (f.kind) {
+    case 'checkbox':
+      return (
+        <input type="checkbox" checked={(parseFloat(value) || 0) !== 0}
+          onChange={(e) => onChange(e.target.checked ? '1' : '0')} />
+      );
+    case 'slider':
+      return (
+        <span className="slider-wrap">
+          <input type="range" min={f.min} max={f.max} step={f.step}
+            value={Number(value) || 0}
+            onChange={(e) => onChange(e.target.value)} />
+          <span className="slider-value">{value}</span>
+        </span>
+      );
+    case 'select':
+      return (
+        <select value={value} onChange={(e) => onChange(e.target.value)}>
+          {f.options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      );
+    case 'number':
+      return (
+        <input type="number" min={f.min} max={f.max} step={f.step ?? 1}
+          value={value} onChange={(e) => onChange(e.target.value)} />
+      );
+    default:
+      return <input value={value} onChange={(e) => onChange(e.target.value)} />;
+  }
+}
+
+interface SettingsProps {
+  onBack: () => void;
+  installDir: string | null;
+  installed: boolean;
+  onUninstall: () => void;
+}
+
+export default function Settings({ onBack, installDir, installed, onUninstall }: SettingsProps) {
   const [settings, setSettings] = useState<QSettings | null>(null);
   const [status, setStatus] = useState('');
   const [capturing, setCapturing] = useState<string | null>(null); // command being rebound
@@ -40,29 +95,42 @@ export default function Settings({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     if (!capturing) return;
-    const onKey = (e: KeyboardEvent) => {
-      e.preventDefault();
-      // Escape cancels the rebind instead of binding the Escape key.
-      if (e.key !== 'Escape') {
-        setSettings((s) =>
-          s ? { ...s, bindings: { ...s.bindings, [capturing]: eventToKey(e) } } : s,
-        );
-      }
-      setCapturing(null);
-    };
-    const onMouse = (e: MouseEvent) => {
-      e.preventDefault();
-      const key = `mouse ${e.button + 1}`;
+
+    const finish = (key: string) => {
       setSettings((s) =>
         s ? { ...s, bindings: { ...s.bindings, [capturing]: key } } : s,
       );
       setCapturing(null);
     };
+
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      // Backspace/Delete clears the bind; Escape cancels without clearing.
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        finish('');
+      } else if (e.key === 'Escape') {
+        setCapturing(null);
+      } else {
+        finish(eventToKey(e));
+      }
+    };
+    const onMouse = (e: MouseEvent) => {
+      e.preventDefault();
+      finish(`mouse ${e.button + 1}`);
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.deltaY === 0) return;
+      // exact Quetoo key names
+      finish(e.deltaY > 0 ? 'mouse wheel down' : 'mouse wheel up');
+    };
     window.addEventListener('keydown', onKey);
     window.addEventListener('mousedown', onMouse);
+    window.addEventListener('wheel', onWheel, { passive: false });
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('mousedown', onMouse);
+      window.removeEventListener('wheel', onWheel);
     };
   }, [capturing]);
 
@@ -96,6 +164,9 @@ export default function Settings({ onBack }: { onBack: () => void }) {
     }
   }
 
+  const cvarGroups = groupBy(CVAR_FIELDS, (f) => f.section);
+  const bindGroups = groupBy(BIND_FIELDS, (f) => f.section);
+
   return (
     <main className="app settings">
       <div className="settings-head">
@@ -103,32 +174,59 @@ export default function Settings({ onBack }: { onBack: () => void }) {
         <h2>Settings</h2>
       </div>
 
-      <section>
-        <h3>Game</h3>
-        {CVAR_FIELDS.map(({ cvar, label }) => (
-          <label key={cvar} className="row">
-            <span>{label}</span>
-            <input
-              value={settings.cvars[cvar] ?? ''}
-              onChange={(e) => setCvar(cvar, e.target.value)}
-            />
-          </label>
-        ))}
-      </section>
+      {cvarGroups.map(([section, fields]) => (
+        <section key={section}>
+          <h3>{section}</h3>
+          {fields.map((f) => (
+            <label key={f.cvar} className="row">
+              <span>
+                {f.label}
+                {f.hint && <span className="hint"> {f.hint}</span>}
+              </span>
+              <CvarInput
+                field={f}
+                value={settings.cvars[f.cvar] ?? ''}
+                onChange={(v) => setCvar(f.cvar, v)}
+              />
+            </label>
+          ))}
+        </section>
+      ))}
+
+      <p className="hint">
+        Click a binding, then press a key to bind it — Backspace clears, Esc cancels.
+      </p>
+      {bindGroups.map(([section, fields]) => (
+        <section key={section}>
+          <h3>{section}</h3>
+          {fields.map(({ command, label }) => {
+            const boundKey = settings.bindings[command] ?? '';
+            return (
+              <div key={command} className="row">
+                <span>{label}</span>
+                <button
+                  className={capturing === command ? 'key capturing' : 'key'}
+                  title={boundKey === '' ? 'unbound' : boundKey}
+                  onClick={() => setCapturing(command)}
+                >
+                  {capturing === command ? 'press a key…' : (boundKey || '—')}
+                </button>
+              </div>
+            );
+          })}
+        </section>
+      ))}
 
       <section>
-        <h3>Controls</h3>
-        {BIND_FIELDS.map(({ command, label }) => (
-          <div key={command} className="row">
-            <span>{label}</span>
-            <button
-              className={capturing === command ? 'key capturing' : 'key'}
-              onClick={() => setCapturing(command)}
-            >
-              {capturing === command ? 'press a key…' : settings.bindings[command] ?? '—'}
-            </button>
-          </div>
-        ))}
+        <h3>Danger zone</h3>
+        <p className="hint">
+          {installed
+            ? `Removes the game from ${installDir}. Your personal data is kept unless you choose otherwise.`
+            : 'Quetoo is not installed.'}
+        </p>
+        <button className="danger" disabled={!installed} onClick={onUninstall}>
+          Uninstall Quetoo
+        </button>
       </section>
 
       <div className="settings-actions">

@@ -32,6 +32,8 @@ button {
   background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.9rem;
 }
 button:hover { background: #262932; }
+button:disabled { opacity: 0.5; cursor: default; }
+button:disabled:hover { background: var(--surface); }
 button.primary {
   background: var(--accent); border-color: var(--accent); color: #04110e; font-weight: 700;
 }
@@ -57,9 +59,17 @@ button.play { background: var(--accent); border-color: var(--accent); color: #04
   background: var(--bg); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 5px 8px; width: 180px;
 }
+.row input[type=checkbox], .row input[type=range] { width: auto; padding: 0; background: none; border: none; }
+.slider-wrap input[type=range] { width: 140px; }
 button.key { min-width: 120px; }
 button.key.capturing { border-color: var(--accent); color: var(--accent); }
 .settings-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+.row select, .row input[type=number] { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 5px 8px; width: 180px; }
+input[type=range] { accent-color: var(--accent); }
+.slider-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.slider-value { min-width: 2.5em; text-align: right; }
+.hint { font-size: 0.75rem; opacity: 0.6; }
+button.danger { border-color: #e0506a; color: #e0506a; }
 
 .update-banner {
   width: 100%; display: flex; align-items: center; justify-content: space-between;

@@ -208,6 +208,50 @@ async fn rollback_update(app: AppHandle) -> std::result::Result<(), error::Launc
     Ok(())
 }
 
+/// Shared teardown for `reinstall` and `uninstall`: refuse if the game is
+/// running or the target doesn't look like a Quetoo install, mark the config
+/// not-installed BEFORE deleting (a partial wipe must self-heal via plain
+/// Install), then wipe the directory contents.
+///
+/// `install_dir` is kept in the config — it is the user's remembered location
+/// preference and is not cleared here.
+fn guarded_wipe(
+    cfg: &mut Config,
+    cfg_path: &std::path::Path,
+    install_dir: &std::path::Path,
+    os: &str,
+) -> Result<()> {
+    ensure_game_not_running(install_dir, os)?;
+
+    if !installer::is_safe_reinstall_target(install_dir)? {
+        return Err(error::LauncherError::Config(format!(
+            "{} doesn't look like a Quetoo install; refusing to delete it",
+            install_dir.display()
+        )));
+    }
+
+    // Reset config BEFORE the deletion loop: if a locked file interrupts the
+    // wipe mid-way, the config must already reflect NotInstalled so that a
+    // plain Install can self-heal. Saving config after a partial wipe would
+    // leave bundle_installed=true on a gutted tree, causing the sanity guard
+    // to refuse a retry.
+    cfg.installed_version = None;
+    cfg.bundle_installed = false;
+    cfg.save(cfg_path)?;
+
+    if install_dir.exists() {
+        for entry in std::fs::read_dir(install_dir)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Wipe the install directory and re-download the full bundle.
 #[tauri::command]
 async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
@@ -218,34 +262,39 @@ async fn reinstall(app: AppHandle) -> std::result::Result<(), error::LauncherErr
         .clone()
         .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
 
-    let os = std::env::consts::OS;
-    ensure_game_not_running(&install_dir, os)?;
+    guarded_wipe(&mut cfg, &path, &install_dir, std::env::consts::OS)?;
+    install_or_update(app).await
+}
 
-    if !installer::is_safe_reinstall_target(&install_dir)? {
-        return Err(error::LauncherError::Config(format!(
-            "{} doesn't look like a Quetoo install; refusing to delete it",
-            install_dir.display()
-        )));
-    }
-    // Reset config BEFORE the deletion loop: if a locked file interrupts the
-    // wipe mid-way, the config must already reflect NotInstalled so that a
-    // plain Install can self-heal. Saving config after a partial wipe would
-    // leave bundle_installed=true on a gutted tree, causing the sanity guard
-    // to refuse a retry.
-    cfg.installed_version = None;
-    cfg.bundle_installed = false;
-    cfg.save(&path)?;
+/// Remove the game from the install directory. Optionally also delete the
+/// per-user Quetoo data (settings, screenshots, demos, downloaded maps),
+/// which is shared by every Quetoo install and mod on this machine.
+#[tauri::command]
+async fn uninstall(
+    app: AppHandle,
+    delete_user_data: bool,
+) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    let install_dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+
+    guarded_wipe(&mut cfg, &path, &install_dir, std::env::consts::OS)?;
+
     if install_dir.exists() {
-        for entry in std::fs::read_dir(&install_dir)? {
-            let p = entry?.path();
-            if p.is_dir() {
-                std::fs::remove_dir_all(&p)?;
-            } else {
-                std::fs::remove_file(&p)?;
-            }
+        // Best effort: a handle held on the dir (Explorer) must not fail us.
+        let _ = std::fs::remove_dir(&install_dir);
+    }
+
+    if delete_user_data {
+        let user_dir = qconfig::quetoo_user_dir()?;
+        if user_dir.exists() {
+            std::fs::remove_dir_all(&user_dir)?;
         }
     }
-    install_or_update(app).await
+    Ok(())
 }
 
 /// Launch the installed game.
@@ -291,6 +340,7 @@ pub fn run() {
             install_or_update,
             rollback_update,
             reinstall,
+            uninstall,
             play,
             get_quetoo_settings,
             save_quetoo_settings,

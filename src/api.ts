@@ -17,6 +17,8 @@ export async function chooseInstallDir(): Promise<string | null> {
 
 export const rollbackUpdate = () => invoke<void>('rollback_update');
 export const reinstall = () => invoke<void>('reinstall');
+export const uninstall = (deleteUserData: boolean) =>
+  invoke<void>('uninstall', { deleteUserData });
 
 export function onInstallProgress(
   cb: (p: InstallProgress) => void,

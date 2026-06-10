@@ -8,19 +8,27 @@ use std::path::PathBuf;
 /// Pure path builder mirroring SDL_GetPrefPath("WickedOldGames", "Quetoo").
 /// `env` returns the value of an environment variable, if set.
 fn user_dir_from_env(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf> {
+    // Empty env values are treated as unset everywhere: this path feeds
+    // remove_dir_all (uninstall), and an empty base would yield a relative
+    // path resolved against the CWD.
     let base = match os {
         "windows" => env("APPDATA")
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| LauncherError::Config("APPDATA not set".into()))?,
         "macos" => {
-            let home = env("HOME").ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
+            let home = env("HOME")
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
             PathBuf::from(home).join("Library").join("Application Support")
         }
         "linux" => {
             if let Some(xdg) = env("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
                 PathBuf::from(xdg)
             } else {
-                let home = env("HOME").ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
+                let home = env("HOME")
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| LauncherError::Config("HOME not set".into()))?;
                 PathBuf::from(home).join(".local").join("share")
             }
         }
@@ -43,26 +51,59 @@ pub fn autoexec_path() -> Result<PathBuf> {
 
 /// (cvar name, default value) for the curated cvar fields, in display order.
 pub const CVARS: &[(&str, &str)] = &[
-    ("name", ""),
-    ("cg_fov", "110"),
-    ("m_sensitivity", "3.0"),
-    ("cg_draw_crosshair", "1"),
-    ("cg_draw_crosshair_scale", "1"),
-    ("cg_draw_crosshair_color", "default"),
-    ("cg_draw_weapon", "1"),
-    ("s_volume", "1"),
+    // Video
+    ("r_fullscreen", "1"), ("r_fullscreen_width", "0"), ("r_fullscreen_height", "0"),
+    ("r_window_width", "1920"), ("r_window_height", "1080"), ("r_swap_interval", "1"),
+    ("cl_max_fps", "-1"), ("r_draw_scale", "1"), ("r_anisotropy", "16"),
+    ("r_antialias", "0"), ("r_modulate", "1"), ("r_saturation", "1"),
+    ("r_bloom", "4"), ("r_shadows", "1"),
+    // Audio
+    ("s_volume", "1"), ("s_effects_volume", "1"), ("s_music_volume", "0.5"),
+    ("s_ambient_volume", "1"), ("s_hrtf", "0"), ("cg_hit_sound", "1"),
+    // Mouse
+    ("m_sensitivity", "3.0"), ("m_sensitivity_zoom", "1.0"), ("m_invert", "0"),
+    ("m_interpolate", "0"), ("cg_run", "1"),
+    // Player
+    ("name", ""), ("skin", "qforcer/default"), ("hand", "1"),
+    ("auto_switch", "1"), ("hook_style", "pull"),
+    // View & HUD
+    ("cg_fov", "110"), ("cg_fov_zoom", "55"), ("cg_draw_hud", "1"),
+    ("cg_draw_weapon", "1"), ("cg_draw_weapon_bob", "1"), ("cg_bob", "1"),
+    ("cg_draw_blend_damage", "1"), ("cl_draw_counters", "1"),
+    ("cl_draw_net_graph", "1"), ("cg_third_person_chasecam", "0"),
+    // Crosshair
+    ("cg_draw_crosshair", "1"), ("cg_draw_crosshair_scale", "1"),
+    ("cg_draw_crosshair_color", "default"), ("cg_draw_crosshair_alpha", "1.0"),
+    ("cg_draw_crosshair_health", "0"), ("cg_draw_crosshair_pulse", "1"),
 ];
 
 /// (action label, bind command, default key) for curated bindings, in display order.
 pub const BINDINGS: &[(&str, &str, &str)] = &[
-    ("Move forward", "+forward", "w"),
-    ("Move back", "+back", "s"),
-    ("Move left", "+move_left", "a"),
-    ("Move right", "+move_right", "d"),
-    ("Jump", "+move_up", "space"),
-    ("Attack", "+attack", "mouse 1"),
-    ("Run/Walk", "+speed", "left shift"),
-    ("Hook", "+hook", "mouse 2"),
+    // Movement
+    ("Move forward", "+forward", "w"), ("Move back", "+back", "s"),
+    ("Move left", "+move_left", "a"), ("Move right", "+move_right", "d"),
+    ("Jump", "+move_up", "space"), ("Crouch", "+move_down", "c"),
+    ("Run/Walk", "+speed", "left shift"), ("Center view", "center_view", "home"),
+    // Combat
+    ("Attack", "+attack", "mouse 1"), ("Hook", "+hook", "mouse 2"),
+    ("Zoom", "+ZOOM", "left alt"),
+    ("Next weapon", "cg_weapon_next", "mouse wheel down"),
+    ("Previous weapon", "cg_weapon_previous", "mouse wheel up"),
+    ("Last weapon", "weapon_last", ""), ("Show score", "+score", "tab"),
+    ("Kill/respawn", "kill", ""),
+    // Weapons
+    ("Blaster", "use blaster", "1"), ("Shotgun", "use shotgun", "2"),
+    ("Super shotgun", "use super shotgun", "3"), ("Machinegun", "use machinegun", "4"),
+    ("Hand grenades", "use hand grenades", "g"),
+    ("Grenade launcher", "use grenade launcher", "5"),
+    ("Rocket launcher", "use rocket launcher", "6"),
+    ("Hyperblaster", "use hyperblaster", "7"),
+    ("Lightning gun", "use lightning gun", "8"), ("Railgun", "use railgun", "9"),
+    ("BFG10K", "use bfg10k", "0"),
+    // Communication
+    ("Chat", "cl_message_mode", "t"), ("Team chat", "cl_message_mode_2", "y"),
+    // Misc
+    ("Screenshot", "r_screenshot", "f12"), ("Toggle console", "cl_toggle_console", "`"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,12 +195,15 @@ pub fn parse_settings(text: &str) -> Settings {
 
 // ── Section D — round-trip write + load/save ──────────────────────────────────
 
-/// Quote a token for writing if it is empty or contains whitespace.
+/// Quote a token for writing if it is empty or contains whitespace. Embedded
+/// double quotes are stripped — cfg syntax has no escape for them, and a raw
+/// `"` inside a value would corrupt tokenization of the rendered line.
 fn quote_if_needed(s: &str) -> String {
+    let s = s.replace('"', "");
     if s.is_empty() || s.chars().any(|c| c.is_whitespace()) {
         format!("\"{s}\"")
     } else {
-        s.to_string()
+        s
     }
 }
 
@@ -180,7 +224,9 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
             if written_cvars.contains(name) {
                 continue; // collapse duplicates
             }
-            let value = settings.cvars.get(name).cloned().unwrap_or_default();
+            // Strip quotes before the empty checks so a quotes-only value is
+            // treated as empty (quote_if_needed strips them anyway on write).
+            let value = settings.cvars.get(name).cloned().unwrap_or_default().replace('"', "");
             if name == "name" && value.is_empty() {
                 continue; // don't write an empty name
             }
@@ -191,7 +237,11 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
             if written_binds.contains(&command) {
                 continue;
             }
-            let key = settings.bindings.get(&command).cloned().unwrap_or_default();
+            let key = settings.bindings.get(&command).cloned().unwrap_or_default().replace('"', "");
+            if key.is_empty() {
+                written_binds.insert(command);
+                continue;
+            }
             out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(&command)));
             written_binds.insert(command);
         } else {
@@ -202,7 +252,7 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     // Append any managed entries not already present.
     for (name, _) in CVARS {
         if !written_cvars.contains(*name) {
-            let value = settings.cvars.get(*name).cloned().unwrap_or_default();
+            let value = settings.cvars.get(*name).cloned().unwrap_or_default().replace('"', "");
             if *name == "name" && value.is_empty() {
                 continue;
             }
@@ -211,7 +261,10 @@ pub fn render_autoexec(existing: &str, settings: &Settings) -> String {
     }
     for (_, command, _) in BINDINGS {
         if !written_binds.contains(*command) {
-            let key = settings.bindings.get(*command).cloned().unwrap_or_default();
+            let key = settings.bindings.get(*command).cloned().unwrap_or_default().replace('"', "");
+            if key.is_empty() {
+                continue;
+            }
             out.push(format!("bind {} {}", quote_if_needed(&key), quote_if_needed(command)));
         }
     }
@@ -348,7 +401,11 @@ mod tests {
         let mut s = Settings::defaults();
         s.cvars.insert("cg_fov".into(), "120".into());
         let out = render_autoexec(existing, &s);
-        assert_eq!(out.matches("set cg_fov").count(), 1);
+        // Count only exact "set cg_fov <value>" lines, not cg_fov_zoom etc.
+        let fov_count = out.lines()
+            .filter(|l| l.starts_with("set cg_fov ") && !l.starts_with("set cg_fov_"))
+            .count();
+        assert_eq!(fov_count, 1);
         assert!(out.contains("set cg_fov 120"));
     }
 
@@ -364,5 +421,158 @@ mod tests {
         assert!(out.contains("bind up +forward"));
         // parsing also reads the annotated line
         assert_eq!(parse_settings(existing).bindings.get("+forward").unwrap(), "w");
+    }
+
+    #[test]
+    fn multiword_bind_command_round_trips() {
+        let s = {
+            let mut s = Settings::defaults();
+            s.bindings.insert("use railgun".into(), "9".into());
+            s
+        };
+        let text = render_autoexec("", &s);
+        assert!(text.contains("bind 9 \"use railgun\""), "got: {text}");
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.bindings.get("use railgun"), Some(&"9".to_string()));
+    }
+
+    #[test]
+    fn empty_key_bind_is_not_written() {
+        let mut s = Settings::defaults();
+        s.bindings.insert("kill".into(), "".into());
+        let text = render_autoexec("", &s);
+        assert!(!text.contains("kill"), "unbound action leaked: {text}");
+    }
+
+    #[test]
+    fn existing_bind_line_removed_when_unbound() {
+        let mut s = Settings::defaults();
+        s.bindings.insert("kill".into(), "".into());
+        let text = render_autoexec("bind x kill\n", &s);
+        assert!(!text.contains("kill"), "stale bind survived: {text}");
+    }
+
+    #[test]
+    fn new_defaults_present() {
+        let d = Settings::defaults();
+        assert_eq!(d.cvars.get("r_fullscreen"), Some(&"1".to_string()));
+        assert_eq!(d.cvars.get("s_music_volume"), Some(&"0.5".to_string()));
+        assert_eq!(d.cvars.get("hook_style"), Some(&"pull".to_string()));
+        assert_eq!(d.bindings.get("+move_down"), Some(&"c".to_string()));
+        assert_eq!(d.bindings.get("cg_weapon_next"), Some(&"mouse wheel down".to_string()));
+        assert_eq!(d.bindings.get("+ZOOM"), Some(&"left alt".to_string()));
+        assert_eq!(d.bindings.get("kill"), Some(&"".to_string()));
+        assert_eq!(d.cvars.len(), 46);
+        assert_eq!(d.bindings.len(), 31);
+    }
+
+    #[test]
+    fn full_tables_round_trip() {
+        let d = Settings::defaults();
+        let text = render_autoexec("", &d);
+        let parsed = parse_settings(&text);
+        // Unbound-by-default actions aren't written, so they parse as defaults
+        // (empty) — full equality must still hold.
+        assert_eq!(parsed, d);
+    }
+
+    // ── Fix 1: empty-string env vars treated as "not set" ────────────────────
+
+    #[test]
+    fn windows_empty_appdata_is_err() {
+        // APPDATA="" must error, not produce a relative path resolved against CWD.
+        let env = env_with(&[("APPDATA", "")]);
+        let err = user_dir_from_env("windows", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("APPDATA"),
+            "expected APPDATA error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn macos_empty_home_is_err() {
+        let env = env_with(&[("HOME", "")]);
+        let err = user_dir_from_env("macos", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("HOME"), "expected HOME error, got: {msg}");
+    }
+
+    #[test]
+    fn linux_empty_home_fallback_is_err() {
+        // XDG_DATA_HOME unset; HOME="" → should error, not produce a relative path.
+        let env = env_with(&[("HOME", "")]);
+        let err = user_dir_from_env("linux", &env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("HOME"), "expected HOME error, got: {msg}");
+    }
+
+    #[test]
+    fn linux_empty_xdg_falls_through_to_home() {
+        // XDG_DATA_HOME="" must be treated as unset and fall back to HOME.
+        let env = env_with(&[("XDG_DATA_HOME", ""), ("HOME", "/home/j")]);
+        let p = user_dir_from_env("linux", &env).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/home/j/.local/share/WickedOldGames/Quetoo")
+        );
+    }
+
+    // ── Fix 2: embedded quotes in cvar values are stripped ───────────────────
+
+    #[test]
+    fn quote_if_needed_strips_embedded_double_quotes() {
+        // A value containing an embedded " must have it stripped so the rendered
+        // line tokenizes cleanly without corrupting subsequent parsing.
+        let rendered = quote_if_needed("Ja\"mes");
+        assert_eq!(rendered, "James");
+    }
+
+    #[test]
+    fn quote_if_needed_only_quotes_becomes_empty_string() {
+        // A value that is nothing but quotes becomes "" (quoted empty).
+        let rendered = quote_if_needed("\"\"");
+        assert_eq!(rendered, "\"\"");
+    }
+
+    #[test]
+    fn cvar_value_with_embedded_quote_roundtrips() {
+        // Setting name to `Ja"mes` should render and re-parse without corruption.
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes".into());
+        let text = render_autoexec("", &s);
+        // The rendered line must not contain the raw embedded quote.
+        assert!(
+            !text.contains("\"mes"),
+            "embedded quote leaked into rendered output: {text}"
+        );
+        // The line must parse back to a sane value (stripped form).
+        let parsed = parse_settings(&text);
+        let name_val = parsed.cvars.get("name").unwrap();
+        assert_eq!(name_val, "James");
+    }
+
+    #[test]
+    fn cvar_value_with_quote_and_spaces_roundtrips() {
+        // `Ja"mes Smith` → strip " → `James Smith` → quoted because of space.
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes Smith".into());
+        let text = render_autoexec("", &s);
+        assert!(!text.contains("\"mes"), "embedded quote leaked: {text}");
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.cvars.get("name").unwrap(), "James Smith");
+    }
+
+    #[test]
+    fn quote_stripping_does_not_corrupt_following_lines() {
+        // Verify that a name with embedded quotes doesn't break parsing of
+        // subsequent lines (the classic re-tokenization failure).
+        let mut s = Settings::defaults();
+        s.cvars.insert("name".into(), "Ja\"mes".into());
+        s.cvars.insert("cg_fov".into(), "100".into());
+        let text = render_autoexec("", &s);
+        let parsed = parse_settings(&text);
+        assert_eq!(parsed.cvars.get("cg_fov").unwrap(), "100",
+            "following cvar corrupted by name with embedded quote; rendered:\n{text}");
     }
 }
