@@ -149,7 +149,7 @@ export default function Settings({ onBack, installDir, installed, onUninstall }:
   async function handleSave() {
     try {
       await saveQuetooSettings(settings!);
-      setStatus('Saved to autoexec.cfg');
+      onBack(); // saved — return to the main view
     } catch (e) {
       setStatus(String(e));
     }
@@ -230,6 +230,7 @@ export default function Settings({ onBack, installDir, installed, onUninstall }:
       </section>
 
       <div className="settings-actions">
+        <span className="hint">Settings apply the next time Quetoo starts.</span>
         <button onClick={handleReset}>Reset to defaults</button>
         <button className="primary" onClick={handleSave}>Save</button>
       </div>
