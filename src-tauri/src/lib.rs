@@ -7,9 +7,12 @@ mod launcher;
 mod qconfig;
 mod snapshot;
 
-use config::Config;
+use config::{Channel, Config};
 use error::Result;
-use github::{determine_state, fetch_latest_release, select_asset, AssetKind, InstallState};
+use github::{
+    determine_state, display_version, fetch_latest_release, fetch_snapshot_release,
+    latest_identity, select_asset, snapshot_available, AssetKind, InstallState, Release,
+};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -38,14 +41,43 @@ struct StatusDto {
     latest_version: String,
     state: InstallState,
     can_rollback: bool,
+    channel: Channel,
+    pre_release_available: bool,
+}
+
+/// Render a state's version identities for display (snapshot timestamps become
+/// "Snapshot (date time)"; stable tags pass through). Comparison upstream uses
+/// raw identities — only the user-facing copy is rewritten here.
+fn display_state(state: InstallState) -> InstallState {
+    match state {
+        InstallState::UpdateAvailable { from, to } => InstallState::UpdateAvailable {
+            from: display_version(&from),
+            to: display_version(&to),
+        },
+        other => other,
+    }
+}
+
+/// Fetch the release for the active channel.
+async fn fetch_for_channel(client: &reqwest::Client, channel: Channel) -> Result<Release> {
+    match channel {
+        Channel::Stable => fetch_latest_release(client).await,
+        Channel::PreRelease => fetch_snapshot_release(client).await,
+    }
 }
 
 /// Check GitHub and return the current launcher status.
 #[tauri::command]
 async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::LauncherError> {
     let cfg = Config::load(&config_path(&app)?)?;
-    let release = fetch_latest_release(&http_client()).await?;
-    let state = determine_state(&cfg, &release.tag_name);
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let channel = cfg.channel;
+
+    let release = fetch_for_channel(&http_client(), channel).await?;
+    let identity = latest_identity(channel, &release);
+    let state = display_state(determine_state(&cfg, &identity));
+
     let can_rollback = match &cfg.install_dir {
         // Degrade to false on a bad manifest — status must always render.
         Some(dir) => snapshot::load_manifest(dir).ok().flatten().is_some(),
@@ -53,11 +85,13 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
     };
     Ok(StatusDto {
         install_dir: cfg.install_dir.map(|p| p.to_string_lossy().into_owned()),
-        default_install_dir: config::default_install_dir(std::env::consts::OS)
+        default_install_dir: config::default_install_dir(os)
             .map(|p| p.to_string_lossy().into_owned()),
-        latest_version: release.tag_name,
+        latest_version: display_version(&identity),
         state,
         can_rollback,
+        channel,
+        pre_release_available: snapshot_available(os, arch),
     })
 }
 
@@ -72,6 +106,19 @@ async fn set_install_dir(
     cfg.install_dir = Some(PathBuf::from(dir));
     cfg.save(&path)?;
     Ok(())
+}
+
+/// Switch the active release channel and return refreshed status.
+#[tauri::command]
+async fn set_channel(
+    app: AppHandle,
+    channel: Channel,
+) -> std::result::Result<StatusDto, error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    cfg.channel = channel;
+    cfg.save(&path)?;
+    get_status(app).await
 }
 
 /// Pre-flight guard: on non-macOS, check that the game executable is not
@@ -92,9 +139,140 @@ fn ensure_game_not_running(install_dir: &std::path::Path, os: &str) -> Result<()
     Ok(())
 }
 
-/// Install or update official Quetoo. First install downloads the full
-/// bundle (engine + game data); afterwards the small update asset.
-/// Updates snapshot the files they overwrite so they can be rolled back.
+/// Download + extract the full game-data bundle for `release` into the install
+/// dir and verify the launch target. Used for the initial install (no backup —
+/// there is nothing to roll back to yet). Sets no config; the caller persists.
+async fn install_bundle(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    install_dir: &std::path::Path,
+    os: &str,
+    arch: &str,
+    release: &Release,
+) -> Result<()> {
+    let asset = select_asset(release, os, arch, AssetKind::Bundle)?.clone();
+    std::fs::create_dir_all(install_dir)?;
+    let tmp = install_dir.join(format!(".{}", asset.name));
+    if let Err(e) = installer::download_asset(app, client, &asset, &tmp).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let format = installer::detect_format(&asset.name)?;
+
+    let app2 = app.clone();
+    let extract_result =
+        installer::extract_archive(&tmp, format, install_dir, &mut |done, total| {
+            let percent = installer::percent(done as u64, total as u64);
+            let detail = if total == 0 {
+                "Preparing\u{2026}".to_string()
+            } else {
+                format!("{done}/{total} files")
+            };
+            installer::emit_progress(&app2, "extract", percent, detail);
+        });
+    let _ = std::fs::remove_file(&tmp);
+    extract_result?;
+
+    installer::emit_progress(app, "verify", 50, "Verifying installation".into());
+    let target = launcher::executable_path(install_dir, os)?;
+    if !target.exists() {
+        return Err(error::LauncherError::Extract(format!(
+            "install incomplete: {} missing",
+            target.display()
+        )));
+    }
+    installer::emit_progress(app, "verify", 100, "Done".into());
+    Ok(())
+}
+
+/// Download + extract the small engine update asset for `release` over an
+/// existing install, snapshotting overwritten files first so the change can be
+/// rolled back. `identity` is recorded as the installed version on success.
+#[allow(clippy::too_many_arguments)]
+async fn apply_engine_update(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    cfg: &mut Config,
+    cfg_path: &std::path::Path,
+    install_dir: &std::path::Path,
+    os: &str,
+    arch: &str,
+    release: &Release,
+    identity: &str,
+) -> Result<()> {
+    let asset = select_asset(release, os, arch, AssetKind::Update)?.clone();
+
+    // Pre-flight: refuse if the executable is locked (Windows holds running
+    // executables open). Checked before any download so nothing is touched.
+    ensure_game_not_running(install_dir, os)?;
+
+    std::fs::create_dir_all(install_dir)?;
+    let tmp = install_dir.join(format!(".{}", asset.name));
+    if let Err(e) = installer::download_asset(app, client, &asset, &tmp).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let format = installer::detect_format(&asset.name)?;
+
+    // Snapshot before overwriting — a failed snapshot aborts the update.
+    if snapshot::has_snapshot_for(install_dir, identity) {
+        // A prior attempt already captured the pre-update state for this
+        // version transition. Reuse it — re-snapshotting after a failed
+        // mid-extract would capture a mixed/new tree as "old".
+        installer::emit_progress(app, "snapshot", 100, "Reusing existing backup".into());
+    } else {
+        installer::emit_progress(app, "snapshot", 0, "Backing up current version".into());
+        let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
+        let snap_result = if os == "macos" {
+            snapshot::create_snapshot_macos(install_dir, &from, identity).map(|_| ())
+        } else {
+            installer::list_entries(&tmp, format).and_then(|entries| {
+                snapshot::create_snapshot(install_dir, &entries, &from, identity).map(|_| ())
+            })
+        };
+        if let Err(e) = snap_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        installer::emit_progress(app, "snapshot", 100, "Backup complete".into());
+    }
+
+    let app2 = app.clone();
+    let extract_result =
+        installer::extract_archive(&tmp, format, install_dir, &mut |done, total| {
+            let percent = installer::percent(done as u64, total as u64);
+            let detail = if total == 0 {
+                "Preparing\u{2026}".to_string()
+            } else {
+                format!("{done}/{total} files")
+            };
+            installer::emit_progress(&app2, "extract", percent, detail);
+        });
+    let _ = std::fs::remove_file(&tmp);
+    extract_result?;
+
+    installer::emit_progress(app, "verify", 50, "Verifying installation".into());
+    let target = launcher::executable_path(install_dir, os)?;
+    if !target.exists() {
+        return Err(error::LauncherError::Extract(format!(
+            "install incomplete: {} missing",
+            target.display()
+        )));
+    }
+    installer::emit_progress(app, "verify", 100, "Done".into());
+
+    cfg.installed_version = Some(identity.to_string());
+    cfg.save(cfg_path)?;
+    Ok(())
+}
+
+/// Install or update Quetoo for the active channel.
+///
+/// Fresh install: download the stable game-data bundle (engine + assets). The
+/// Snapshot pre-release ships only engine binaries, so a Pre-Release install
+/// then overlays the snapshot engine on top of the stable bundle. Updates and
+/// channel switches overlay just the engine asset, snapshotting first so they
+/// can be rolled back.
 #[tauri::command]
 async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     let path = config_path(&app)?;
@@ -107,88 +285,28 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     let client = http_client();
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let release = fetch_latest_release(&client).await?;
+    let channel = cfg.channel;
 
-    // Bundle if we've never installed one; otherwise a small update.
-    let kind = if cfg.bundle_installed {
-        AssetKind::Update
-    } else {
-        AssetKind::Bundle
-    };
-    let asset = select_asset(&release, os, arch, kind)?.clone();
-
-    // Pre-flight: on non-macOS, refuse to update if the executable is locked
-    // (Windows holds running executables open). Checked before any download so
-    // nothing is touched on failure.
-    if kind == AssetKind::Update {
-        ensure_game_not_running(&install_dir, os)?;
-    }
-
-    std::fs::create_dir_all(&install_dir)?;
-    let tmp = install_dir.join(format!(".{}", asset.name));
-    if let Err(e) = installer::download_asset(&app, &client, &asset, &tmp).await {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    let format = installer::detect_format(&asset.name)?;
-
-    // Snapshot before updates only — a failed snapshot aborts the update.
-    if kind == AssetKind::Update {
-        if snapshot::has_snapshot_for(&install_dir, &release.tag_name) {
-            // A prior attempt already captured the pre-update state for this
-            // version transition. Reuse it — re-snapshotting after a failed
-            // mid-extract would capture a mixed/new tree as "old".
-            installer::emit_progress(&app, "snapshot", 100, "Reusing existing backup".into());
-        } else {
-            installer::emit_progress(&app, "snapshot", 0, "Backing up current version".into());
-            let from = cfg.installed_version.clone().unwrap_or_else(|| "unknown".into());
-            let snap_result = if os == "macos" {
-                snapshot::create_snapshot_macos(&install_dir, &from, &release.tag_name).map(|_| ())
-            } else {
-                installer::list_entries(&tmp, format).and_then(|entries| {
-                    snapshot::create_snapshot(&install_dir, &entries, &from, &release.tag_name)
-                        .map(|_| ())
-                })
-            };
-            if let Err(e) = snap_result {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-            installer::emit_progress(&app, "snapshot", 100, "Backup complete".into());
-        }
-    }
-
-    let app2 = app.clone();
-    let extract_result =
-        installer::extract_archive(&tmp, format, &install_dir, &mut |done, total| {
-            let percent = installer::percent(done as u64, total as u64);
-            let detail = if total == 0 {
-                "Preparing\u{2026}".to_string()
-            } else {
-                format!("{done}/{total} files")
-            };
-            installer::emit_progress(&app2, "extract", percent, detail);
-        });
-    let _ = std::fs::remove_file(&tmp);
-    extract_result?;
-
-    // Verify the launch target exists before declaring success.
-    installer::emit_progress(&app, "verify", 50, "Verifying installation".into());
-    let target = launcher::executable_path(&install_dir, os)?;
-    if !target.exists() {
-        return Err(error::LauncherError::Extract(format!(
-            "install incomplete: {} missing",
-            target.display()
-        )));
-    }
-    installer::emit_progress(&app, "verify", 100, "Done".into());
-
-    if kind == AssetKind::Bundle {
+    // Phase 1: ensure the game-data bundle exists (always from Stable).
+    if !cfg.bundle_installed {
+        let stable = fetch_latest_release(&client).await?;
+        install_bundle(&app, &client, &install_dir, os, arch, &stable).await?;
         cfg.bundle_installed = true;
+        cfg.installed_version = Some(stable.tag_name);
+        cfg.save(&path)?;
+        if channel == Channel::Stable {
+            return Ok(());
+        }
+        // Pre-Release fresh install: fall through to overlay the snapshot.
     }
-    cfg.installed_version = Some(release.tag_name);
-    cfg.save(&path)?;
-    Ok(())
+
+    // Phase 2: overlay the active channel's engine update on top of the bundle.
+    let release = fetch_for_channel(&client, channel).await?;
+    let identity = latest_identity(channel, &release);
+    apply_engine_update(
+        &app, &client, &mut cfg, &path, &install_dir, os, arch, &release, &identity,
+    )
+    .await
 }
 
 /// Restore the previous version from the pre-update snapshot.
@@ -456,6 +574,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             set_install_dir,
+            set_channel,
             install_or_update,
             rollback_update,
             reinstall,
