@@ -13,9 +13,11 @@
     "windows": [
       {
         "title": "Quetoo Launcher",
-        "width": 560,
-        "height": 620,
-        "resizable": false
+        "width": 920,
+        "height": 700,
+        "resizable": true,
+        "minWidth": 640,
+        "minHeight": 560
       }
     ],
     "security": {

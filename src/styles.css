@@ -13,6 +13,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .app {
   display: flex; flex-direction: column; align-items: center;
   gap: 14px; padding: 24px; text-align: center;
+  max-width: 900px; margin: 0 auto;
 }
 .brand {
   display: flex; align-items: center; justify-content: space-between;
