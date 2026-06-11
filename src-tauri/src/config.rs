@@ -2,6 +2,17 @@ use crate::error::{LauncherError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Which Quetoo release channel the launcher tracks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Channel {
+    /// Latest stable release (`releases/latest`).
+    #[default]
+    Stable,
+    /// Rolling "Quetoo Snapshot" pre-release (`releases/tags/latest`).
+    PreRelease,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub install_dir: Option<PathBuf>,
@@ -10,6 +21,8 @@ pub struct Config {
     pub bundle_installed: bool,
     #[serde(default)]
     pub favorites: Vec<String>,
+    #[serde(default)]
+    pub channel: Channel,
 }
 
 impl Config {
@@ -95,6 +108,7 @@ mod tests {
             installed_version: Some("v1.0.25".into()),
             bundle_installed: true,
             favorites: vec![],
+            channel: Channel::Stable,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -185,11 +199,48 @@ mod tests {
             installed_version: None,
             bundle_installed: false,
             favorites: vec!["1.2.3.4:1998".to_string()],
+            channel: Channel::Stable,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.favorites, vec!["1.2.3.4:1998"]);
         assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn channel_defaults_to_stable() {
+        assert_eq!(Channel::default(), Channel::Stable);
+        assert_eq!(Config::default().channel, Channel::Stable);
+    }
+
+    #[test]
+    fn load_old_config_without_channel_defaults_to_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // JSON that predates the channel field — must still load cleanly.
+        std::fs::write(
+            &path,
+            r#"{"install_dir":null,"installed_version":null,"bundle_installed":false,"favorites":[]}"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.channel, Channel::Stable);
+    }
+
+    #[test]
+    fn channel_roundtrips_prerelease() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let cfg = Config {
+            install_dir: None,
+            installed_version: None,
+            bundle_installed: false,
+            favorites: vec![],
+            channel: Channel::PreRelease,
+        };
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.channel, Channel::PreRelease);
     }
 
     // --- normalize_favorite tests ---
