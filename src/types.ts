@@ -24,6 +24,8 @@ export interface ServerList {
   masterOk: boolean;
 }
 
+export type Channel = 'stable' | 'preRelease';
+
 export type InstallState =
   | { state: 'notInstalled' }
   | { state: 'updateAvailable'; from: string; to: string }
@@ -35,6 +37,8 @@ export interface Status {
   latestVersion: string;
   state: InstallState;
   canRollback: boolean;
+  channel: Channel;
+  preReleaseAvailable: boolean;
 }
 
 export type InstallPhase = 'download' | 'snapshot' | 'extract' | 'verify';

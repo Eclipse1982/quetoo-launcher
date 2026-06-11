@@ -10,11 +10,12 @@ import {
   play,
   reinstall,
   rollbackUpdate,
+  setChannel,
   setInstallDir,
   uninstall,
   type LauncherUpdate,
 } from './api';
-import type { InstallPhase, Status } from './types';
+import type { Channel, InstallPhase, Status } from './types';
 import Settings from './Settings';
 import ServerBrowser from './ServerBrowser';
 import './styles.css';
@@ -82,6 +83,19 @@ export default function App() {
     if (!dir) return;
     await setInstallDir(dir);
     await refresh();
+  }
+
+  async function handleSetChannel(channel: Channel) {
+    if (!status || status.channel === channel) return;
+    setPhase('loading');
+    setMessage(channel === 'preRelease' ? 'Switching to Pre-Release…' : 'Switching to Stable…');
+    try {
+      setStatus(await setChannel(channel));
+      setPhase('idle');
+    } catch (e) {
+      setMessage(String(e));
+      setPhase('error');
+    }
   }
 
   async function handleInstall() {
@@ -252,6 +266,33 @@ export default function App() {
 
       {phase === 'idle' && status && (
         <>
+          <div className="channel-toggle" role="group" aria-label="Release channel">
+            <button
+              className={status.channel === 'stable' ? 'active' : ''}
+              disabled={status.channel === 'stable'}
+              onClick={() => handleSetChannel('stable')}
+            >
+              Stable
+            </button>
+            <button
+              className={status.channel === 'preRelease' ? 'active' : ''}
+              disabled={status.channel === 'preRelease' || !status.preReleaseAvailable}
+              onClick={() => handleSetChannel('preRelease')}
+              title={
+                status.preReleaseAvailable
+                  ? 'Latest snapshot build from the main branch'
+                  : 'Pre-Release builds are not available for your platform'
+              }
+            >
+              Pre-Release
+            </button>
+          </div>
+          {!status.preReleaseAvailable && (
+            <p className="status channel-note">
+              Pre-Release builds aren’t available for your platform.
+            </p>
+          )}
+
           <p className="status">
             Install folder:{' '}
             {status.installDir ??

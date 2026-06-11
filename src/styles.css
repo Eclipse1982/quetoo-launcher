@@ -81,6 +81,22 @@ button.danger { border-color: #e0506a; color: #e0506a; }
 
 .btn-row { display: flex; gap: 10px; justify-content: center; }
 
+/* release channel toggle */
+.channel-toggle {
+  display: inline-flex; align-self: center;
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+}
+.channel-toggle button {
+  border: none; border-radius: 0; padding: 6px 16px;
+  background: var(--surface); color: var(--text-dim); font-size: 0.85rem;
+}
+.channel-toggle button:hover:not(:disabled) { background: #262932; color: var(--text); }
+.channel-toggle button.active {
+  background: var(--accent); color: #04110e; font-weight: 700;
+}
+.channel-toggle button:disabled:not(.active) { opacity: 0.4; cursor: not-allowed; }
+.channel-note { font-size: 0.78rem; }
+
 /* server browser */
 .sb-view { align-items: stretch; overflow-y: auto; max-height: 100vh; gap: 10px; }
 .sb-header { display: flex; align-items: center; gap: 12px; }
