@@ -348,7 +348,7 @@ pub async fn run_sync(
     let mut checked = 0usize;
     for entry in &manifest {
         checked += 1;
-        if checked % 200 == 0 || checked == total {
+        if checked.is_multiple_of(200) || checked == total {
             installer::data_progress_label(app, checked, total);
         }
         let dest = local_path(install_dir, &entry.path);
