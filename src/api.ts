@@ -3,12 +3,13 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ask, open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
-import type { Channel, InstallProgress, ServerList, Settings, Status } from './types';
+import type { Channel, InstallProgress, ServerList, Settings, Status, SyncSummary } from './types';
 
 export const getStatus = () => invoke<Status>('get_status');
 export const setInstallDir = (dir: string) => invoke<void>('set_install_dir', { dir });
 export const setChannel = (channel: Channel) => invoke<Status>('set_channel', { channel });
 export const installOrUpdate = () => invoke<void>('install_or_update');
+export const syncData = (verify = false) => invoke<SyncSummary>('sync_data', { verify });
 export const play = () => invoke<void>('play');
 
 export async function chooseInstallDir(): Promise<string | null> {
