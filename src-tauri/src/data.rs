@@ -11,6 +11,8 @@ use tauri::AppHandle;
 const DATA_BASE_URL: &str = "https://quetoo-data.s3.amazonaws.com/default/";
 /// The manifest object within the data set.
 const MANIFEST_URL: &str = "https://quetoo-data.s3.amazonaws.com/default/manifest.mf";
+/// Max files hashed concurrently during the verify/seed pass.
+const HASH_CONCURRENCY: usize = 8;
 
 /// One line of `manifest.mf`: `md5 size path` (path is relative to the
 /// `default/` game dir, e.g. `maps/2deaths.bsp`).
@@ -326,6 +328,7 @@ pub async fn run_sync(
     install_dir: &Path,
     verify: bool,
 ) -> Result<SyncSummary> {
+    use futures_util::stream::{self, StreamExt};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -342,15 +345,12 @@ pub async fn run_sync(
         }
     };
 
-    // --- Plan pass: classify every entry, seeding the index for confirmed files.
+    // --- Plan pass (cheap): classify by stat only. Hashing is deferred to the
+    // parallel pass below instead of blocking this loop one file at a time.
     let total = manifest.len();
     let mut to_download: Vec<ManifestEntry> = Vec::new();
-    let mut checked = 0usize;
+    let mut to_hash: Vec<ManifestEntry> = Vec::new();
     for entry in &manifest {
-        checked += 1;
-        if checked.is_multiple_of(200) || checked == total {
-            installer::data_progress_label(app, checked, total);
-        }
         let dest = local_path(install_dir, &entry.path);
         let local = stat_local(&dest);
         match decide(entry, index.files.get(&entry.path), local.as_ref(), verify) {
@@ -367,22 +367,67 @@ pub async fn run_sync(
                 }
             }
             Decision::Download => to_download.push(entry.clone()),
-            Decision::NeedsHash => match verify_file(&dest, entry.size, &entry.md5) {
-                Ok(true) => {
-                    if let Some(l) = stat_local(&dest) {
-                        index.files.insert(
-                            entry.path.clone(),
-                            IndexEntry {
-                                md5: entry.md5.clone(),
-                                size: entry.size,
-                                mtime: l.mtime,
-                            },
+            Decision::NeedsHash => to_hash.push(entry.clone()),
+        }
+    }
+
+    // --- Hash pass (parallel): verify size-matched files whose trust is
+    // unproven — mainly the one-time seed right after a bundle install. Each
+    // hash runs on a blocking thread so many files are read+hashed at once,
+    // instead of one-at-a-time on the async runtime (the slow part otherwise).
+    let hash_total = to_hash.len();
+    if hash_total > 0 {
+        let hashed = Arc::new(AtomicUsize::new(0));
+        installer::emit_progress(app, "data", 0, format!("Checking {hash_total} files"));
+        let hash_results: Vec<std::result::Result<(ManifestEntry, i64), ManifestEntry>> =
+            stream::iter(to_hash.into_iter().map(|entry| {
+                let dest = local_path(install_dir, &entry.path);
+                let app = app.clone();
+                let hashed = hashed.clone();
+                async move {
+                    let size = entry.size;
+                    let md5 = entry.md5.clone();
+                    let d = dest.clone();
+                    let ok = tokio::task::spawn_blocking(move || {
+                        verify_file(&d, size, &md5).unwrap_or(false)
+                    })
+                    .await
+                    .unwrap_or(false);
+                    let n = hashed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_multiple_of(100) || n == hash_total {
+                        installer::emit_progress(
+                            &app,
+                            "data",
+                            installer::percent(n as u64, hash_total as u64),
+                            format!("Checking {n}/{hash_total} files"),
                         );
                     }
+                    if ok {
+                        let mtime = stat_local(&dest).map(|s| s.mtime).unwrap_or(0);
+                        Ok((entry, mtime))
+                    } else {
+                        Err(entry)
+                    }
                 }
-                _ => to_download.push(entry.clone()),
-            },
+            }))
+            .buffer_unordered(HASH_CONCURRENCY)
+            .collect()
+            .await;
+
+        for r in hash_results {
+            match r {
+                Ok((entry, mtime)) => {
+                    index.files.insert(
+                        entry.path,
+                        IndexEntry { md5: entry.md5, size: entry.size, mtime },
+                    );
+                }
+                Err(entry) => to_download.push(entry),
+            }
         }
+        // Persist the seed immediately so an interrupted download pass doesn't
+        // force a full re-hash on the next open.
+        let _ = index.save(&index_path);
     }
 
     // --- Download pass: bounded concurrency + retry.
@@ -391,7 +436,6 @@ pub async fn run_sync(
     let bytes = Arc::new(AtomicU64::new(0));
     let done = Arc::new(AtomicUsize::new(0));
 
-    use futures_util::stream::{self, StreamExt};
     let results: Vec<std::result::Result<(String, IndexEntry, u64), ()>> =
         stream::iter(to_download.into_iter().map(|entry| {
             let client = client.clone();
@@ -459,7 +503,7 @@ pub async fn run_sync(
     installer::emit_progress(app, "data", 100, "Game data up to date".into());
 
     Ok(SyncSummary {
-        checked,
+        checked: total,
         downloaded,
         deleted,
         bytes_downloaded,
