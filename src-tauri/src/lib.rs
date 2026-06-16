@@ -1,5 +1,6 @@
 mod browser;
 mod config;
+mod data;
 mod error;
 mod github;
 mod installer;
@@ -272,7 +273,8 @@ async fn apply_engine_update(
 /// Snapshot pre-release ships only engine binaries, so a Pre-Release install
 /// then overlays the snapshot engine on top of the stable bundle. Updates and
 /// channel switches overlay just the engine asset, snapshotting first so they
-/// can be rolled back.
+/// can be rolled back. Every path finishes by syncing game data to the latest
+/// quetoo-data manifest.
 #[tauri::command]
 async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
     let path = config_path(&app)?;
@@ -287,26 +289,53 @@ async fn install_or_update(app: AppHandle) -> std::result::Result<(), error::Lau
     let arch = std::env::consts::ARCH;
     let channel = cfg.channel;
 
-    // Phase 1: ensure the game-data bundle exists (always from Stable).
+    // Phase 1: ensure the engine+data bundle exists (always from Stable).
+    let mut bundle_just_installed_stable = false;
     if !cfg.bundle_installed {
         let stable = fetch_latest_release(&client).await?;
         install_bundle(&app, &client, &install_dir, os, arch, &stable).await?;
         cfg.bundle_installed = true;
         cfg.installed_version = Some(stable.tag_name);
         cfg.save(&path)?;
-        if channel == Channel::Stable {
-            return Ok(());
-        }
-        // Pre-Release fresh install: fall through to overlay the snapshot.
+        bundle_just_installed_stable = channel == Channel::Stable;
     }
 
-    // Phase 2: overlay the active channel's engine update on top of the bundle.
-    let release = fetch_for_channel(&client, channel).await?;
-    let identity = latest_identity(channel, &release);
-    apply_engine_update(
-        &app, &client, &mut cfg, &path, &install_dir, os, arch, &release, &identity,
-    )
-    .await
+    // Phase 2: overlay the active channel's engine update on top of the bundle,
+    // unless a fresh Stable bundle already provided the correct engine.
+    if !bundle_just_installed_stable {
+        let release = fetch_for_channel(&client, channel).await?;
+        let identity = latest_identity(channel, &release);
+        apply_engine_update(
+            &app, &client, &mut cfg, &path, &install_dir, os, arch, &release, &identity,
+        )
+        .await?;
+    }
+
+    // Phase 3: bring game data current. Non-fatal — offline play stays allowed.
+    let _ = data::run_sync(&app, &client, &install_dir, false).await;
+    Ok(())
+}
+
+/// Sync the `default` game data set to match quetoo-data's manifest. No-op
+/// (returns a `skipped` summary) when nothing is installed yet. `verify = true`
+/// forces a full re-hash ("Verify data").
+#[tauri::command]
+async fn sync_data(
+    app: AppHandle,
+    verify: bool,
+) -> std::result::Result<data::SyncSummary, error::LauncherError> {
+    let cfg = Config::load(&config_path(&app)?)?;
+    let install_dir = match cfg.install_dir {
+        Some(dir) if cfg.bundle_installed => dir,
+        _ => {
+            return Ok(data::SyncSummary {
+                skipped: true,
+                ..Default::default()
+            })
+        }
+    };
+    let client = http_client();
+    data::run_sync(&app, &client, &install_dir, verify).await
 }
 
 /// Restore the previous version from the pre-update snapshot.
@@ -576,6 +605,7 @@ pub fn run() {
             set_install_dir,
             set_channel,
             install_or_update,
+            sync_data,
             rollback_update,
             reinstall,
             uninstall,

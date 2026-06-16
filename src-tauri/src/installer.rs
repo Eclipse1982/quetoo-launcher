@@ -18,6 +18,16 @@ pub fn emit_progress(app: &AppHandle, phase: &'static str, percent: u8, detail: 
     let _ = app.emit("install-progress", InstallProgress { phase, percent, detail });
 }
 
+/// Progress label for the data-sync "check/seed" pass.
+pub fn data_progress_label(app: &AppHandle, checked: usize, total: usize) {
+    emit_progress(
+        app,
+        "data",
+        percent(checked as u64, total as u64),
+        format!("Checking {checked}/{total} files"),
+    );
+}
+
 /// Integer percent clamped to 100 (guards lying servers / stale sizes).
 pub fn percent(done: u64, total: u64) -> u8 {
     if total == 0 {
