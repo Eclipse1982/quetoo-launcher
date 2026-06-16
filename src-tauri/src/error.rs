@@ -20,6 +20,8 @@ pub enum LauncherError {
     Launch(String),
     #[error("rollback error: {0}")]
     Rollback(String),
+    #[error("data sync error: {0}")]
+    Data(String),
     #[error("{0}")]
     Busy(String),
 }

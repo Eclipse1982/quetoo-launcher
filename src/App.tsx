@@ -12,6 +12,7 @@ import {
   rollbackUpdate,
   setChannel,
   setInstallDir,
+  syncData,
   uninstall,
   type LauncherUpdate,
 } from './api';
@@ -27,6 +28,7 @@ const PHASE_LABELS: Record<InstallPhase, string> = {
   snapshot: 'Backing up current version',
   extract: 'Installing files',
   verify: 'Verifying',
+  data: 'Updating game data',
 };
 
 export default function App() {
@@ -43,7 +45,22 @@ export default function App() {
     setPhase('loading');
     setMessage('Checking for updates…');
     try {
-      setStatus(await getStatus());
+      const s = await getStatus();
+      setStatus(s);
+      // When the engine is current, keep game data current before showing Play.
+      // Offline-safe: sync_data resolves (skipped) rather than throwing, so the
+      // user can still play with existing data.
+      if (s.state.state === 'upToDate') {
+        setPhase('working');
+        setMessage('Updating game data…');
+        setPercent(0);
+        setDetail('');
+        try {
+          await syncData(false);
+        } catch {
+          // ignore: allow Play with whatever data is present
+        }
+      }
       setPhase('idle');
     } catch (e) {
       setMessage(String(e));
@@ -329,6 +346,13 @@ export default function App() {
               {status.canRollback && (
                 <button onClick={handleRollback}>↩ Roll back update</button>
               )}
+              <button
+                onClick={() =>
+                  run(() => syncData(true).then(() => undefined), 'Verifying game data…')
+                }
+              >
+                Verify data
+              </button>
               <button onClick={handleReinstall}>Reinstall</button>
             </div>
           )}

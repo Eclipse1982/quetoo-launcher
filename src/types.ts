@@ -41,12 +41,21 @@ export interface Status {
   preReleaseAvailable: boolean;
 }
 
-export type InstallPhase = 'download' | 'snapshot' | 'extract' | 'verify';
+export type InstallPhase = 'download' | 'snapshot' | 'extract' | 'verify' | 'data';
 
 export interface InstallProgress {
   phase: InstallPhase;
   percent: number;
   detail: string;
+}
+
+export interface SyncSummary {
+  checked: number;
+  downloaded: number;
+  deleted: number;
+  bytesDownloaded: number;
+  warnings: number;
+  skipped: boolean;
 }
 
 export interface Settings {
