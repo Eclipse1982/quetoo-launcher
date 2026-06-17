@@ -3,6 +3,7 @@ import {
   checkLauncherUpdate,
   chooseInstallDir,
   confirmDialog,
+  getQuetooSettings,
   getStatus,
   installOrUpdate,
   joinServer,
@@ -10,8 +11,10 @@ import {
   play,
   reinstall,
   rollbackUpdate,
+  saveQuetooSettings,
   setChannel,
   setInstallDir,
+  setOnboarded,
   syncData,
   uninstall,
   type LauncherUpdate,
@@ -19,6 +22,7 @@ import {
 import type { Channel, InstallPhase, Status } from './types';
 import Settings from './Settings';
 import ServerBrowser from './ServerBrowser';
+import Onboarding from './Onboarding';
 import './styles.css';
 
 type Phase = 'loading' | 'idle' | 'working' | 'error';
@@ -199,8 +203,55 @@ export default function App() {
     }
   }
 
+  async function handleOnboardingComplete(name: string, dir: string) {
+    await run(async () => {
+      await setInstallDir(dir);
+      if (name) {
+        // Player name is non-critical — don't fail onboarding if it can't write.
+        try {
+          const s = await getQuetooSettings();
+          await saveQuetooSettings({ ...s, cvars: { ...s.cvars, name } });
+        } catch {
+          /* ignore */
+        }
+      }
+      await setOnboarded();
+      await installOrUpdate();
+    }, 'Starting…');
+  }
+
+  async function handleOnboardingSkip() {
+    try {
+      await setOnboarded();
+    } catch {
+      /* ignore */
+    }
+    await refresh();
+  }
+
   const installed =
     status?.state.state === 'upToDate' || status?.state.state === 'updateAvailable';
+
+  // First-run onboarding: only for a fresh user (nothing installed) who hasn't
+  // been onboarded. Existing installs (legacy configs default onboarded=false)
+  // are excluded by the notInstalled check, so they never see it.
+  if (
+    status &&
+    !status.onboarded &&
+    status.state.state === 'notInstalled' &&
+    phase !== 'working' &&
+    phase !== 'error'
+  ) {
+    return (
+      <Onboarding
+        defaultDir={status.defaultInstallDir}
+        initialDir={status.installDir}
+        chooseDir={chooseInstallDir}
+        onComplete={handleOnboardingComplete}
+        onSkip={handleOnboardingSkip}
+      />
+    );
+  }
 
   if (view === 'settings') {
     return (
