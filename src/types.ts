@@ -39,6 +39,14 @@ export interface Status {
   canRollback: boolean;
   channel: Channel;
   preReleaseAvailable: boolean;
+  onboarded: boolean;
+}
+
+export interface SkinInfo {
+  id: string; // "model/skin"
+  model: string;
+  skin: string;
+  icon: string | null; // base64 data URL of the skin's preview icon
 }
 
 export type InstallPhase = 'download' | 'snapshot' | 'extract' | 'verify' | 'data';

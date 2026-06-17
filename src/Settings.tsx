@@ -4,10 +4,13 @@ import {
   CVAR_FIELDS,
   type CvarField,
   type Settings as QSettings,
+  type SkinInfo,
 } from './types';
 import {
   defaultQuetooSettings,
   getQuetooSettings,
+  listSkins,
+  readDataImage,
   saveQuetooSettings,
 } from './api';
 
@@ -75,6 +78,171 @@ function CvarInput({ field, value, onChange }: {
     default:
       return <input value={value} onChange={(e) => onChange(e.target.value)} />;
   }
+}
+
+/** Quetoo ships 6 crosshair styles as pics/ch1.png … pics/ch6.png. */
+const CROSSHAIRS = [1, 2, 3, 4, 5, 6];
+
+/** Resolve a crosshair color cvar to a CSS color. 'default' → white. */
+function colorCss(v: string): string {
+  if (!v || v === 'default') return '#ffffff';
+  if (/^[0-9a-fA-F]{6}$/.test(v)) return `#${v}`;
+  return v; // already a CSS color / #-prefixed
+}
+
+/** Crosshair section: live preview + visual picker, falling back to the plain
+ *  inputs when the game isn't installed (no images to load). */
+function CrosshairSection({ fields, cvars, setCvar, installed }: {
+  fields: CvarField[];
+  cvars: Record<string, string>;
+  setCvar: (cvar: string, value: string) => void;
+  installed: boolean;
+}) {
+  const [imgs, setImgs] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    if (!installed) return;
+    let cancelled = false;
+    (async () => {
+      const entries: [number, string][] = [];
+      for (const n of CROSSHAIRS) {
+        try {
+          entries.push([n, await readDataImage(`pics/ch${n}.png`)]);
+        } catch {
+          /* skip a missing crosshair image */
+        }
+      }
+      if (!cancelled) setImgs(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [installed]);
+
+  const current = parseInt(cvars['cg_draw_crosshair'] ?? '0', 10) || 0;
+  const color = colorCss(cvars['cg_draw_crosshair_color'] ?? 'default');
+  const scale = parseFloat(cvars['cg_draw_crosshair_scale'] ?? '1') || 1;
+  const alphaRaw = parseFloat(cvars['cg_draw_crosshair_alpha'] ?? '1');
+  const alpha = isNaN(alphaRaw) ? 1 : alphaRaw;
+  const curImg = imgs[current];
+
+  return (
+    <section>
+      <h3>Crosshair</h3>
+
+      {installed && (
+        <>
+          <div className="xhair-preview">
+            {current !== 0 && curImg ? (
+              <span
+                className="xhair-mark"
+                style={{
+                  maskImage: `url(${curImg})`,
+                  WebkitMaskImage: `url(${curImg})`,
+                  backgroundColor: color,
+                  width: `${48 * scale}px`,
+                  height: `${48 * scale}px`,
+                  opacity: alpha,
+                }}
+              />
+            ) : (
+              <span className="xhair-none">No crosshair</span>
+            )}
+          </div>
+
+          <div className="xhair-grid">
+            <button
+              type="button"
+              className={current === 0 ? 'xhair-opt active' : 'xhair-opt'}
+              onClick={() => setCvar('cg_draw_crosshair', '0')}
+            >
+              Off
+            </button>
+            {CROSSHAIRS.map((n) => (
+              <button
+                key={n}
+                type="button"
+                className={current === n ? 'xhair-opt active' : 'xhair-opt'}
+                title={`Crosshair ${n}`}
+                onClick={() => setCvar('cg_draw_crosshair', String(n))}
+              >
+                {imgs[n] ? (
+                  <span
+                    className="xhair-thumb"
+                    style={{
+                      maskImage: `url(${imgs[n]})`,
+                      WebkitMaskImage: `url(${imgs[n]})`,
+                      backgroundColor: color,
+                    }}
+                  />
+                ) : (
+                  n
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {fields.map((f) => {
+        // The picker above replaces the numeric style field when installed.
+        if (f.cvar === 'cg_draw_crosshair' && installed) return null;
+        return (
+          <label key={f.cvar} className="row">
+            <span>
+              {f.label}
+              {f.hint && <span className="hint"> {f.hint}</span>}
+            </span>
+            <CvarInput field={f} value={cvars[f.cvar] ?? ''} onChange={(v) => setCvar(f.cvar, v)} />
+          </label>
+        );
+      })}
+    </section>
+  );
+}
+
+/** Skin/model picker: grid of preview icons, falling back to a text field when
+ *  nothing is installed (no skins to list). */
+function SkinField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [skins, setSkins] = useState<SkinInfo[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    listSkins().then(setSkins).catch(() => setSkins([]));
+  }, []);
+
+  if (skins.length === 0) {
+    return <input value={value} onChange={(e) => onChange(e.target.value)} />;
+  }
+
+  return (
+    <div className="skin-field">
+      <button type="button" className="skin-current" onClick={() => setOpen((o) => !o)}>
+        {value || 'select…'} ▾
+      </button>
+      {open && (
+        <div className="skin-grid">
+          {skins.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={s.id === value ? 'skin-opt active' : 'skin-opt'}
+              title={s.id}
+              onClick={() => {
+                onChange(s.id);
+                setOpen(false);
+              }}
+            >
+              {s.icon ? (
+                <img src={s.icon} alt={s.id} />
+              ) : (
+                <span className="skin-noicon">{s.skin}</span>
+              )}
+              <span className="skin-label">{s.id}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface SettingsProps {
@@ -174,24 +342,41 @@ export default function Settings({ onBack, installDir, installed, onUninstall }:
         <h2>Settings</h2>
       </div>
 
-      {cvarGroups.map(([section, fields]) => (
-        <section key={section}>
-          <h3>{section}</h3>
-          {fields.map((f) => (
-            <label key={f.cvar} className="row">
-              <span>
-                {f.label}
-                {f.hint && <span className="hint"> {f.hint}</span>}
-              </span>
-              <CvarInput
-                field={f}
-                value={settings.cvars[f.cvar] ?? ''}
-                onChange={(v) => setCvar(f.cvar, v)}
-              />
-            </label>
-          ))}
-        </section>
-      ))}
+      {cvarGroups.map(([section, fields]) =>
+        section === 'Crosshair' ? (
+          <CrosshairSection
+            key={section}
+            fields={fields}
+            cvars={settings.cvars}
+            setCvar={setCvar}
+            installed={installed}
+          />
+        ) : (
+          <section key={section}>
+            <h3>{section}</h3>
+            {fields.map((f) => (
+              <label key={f.cvar} className="row">
+                <span>
+                  {f.label}
+                  {f.hint && <span className="hint"> {f.hint}</span>}
+                </span>
+                {f.cvar === 'skin' && installed ? (
+                  <SkinField
+                    value={settings.cvars[f.cvar] ?? ''}
+                    onChange={(v) => setCvar('skin', v)}
+                  />
+                ) : (
+                  <CvarInput
+                    field={f}
+                    value={settings.cvars[f.cvar] ?? ''}
+                    onChange={(v) => setCvar(f.cvar, v)}
+                  />
+                )}
+              </label>
+            ))}
+          </section>
+        ),
+      )}
 
       <p className="hint">
         Click a binding, then press a key to bind it — Backspace clears, Esc cancels.

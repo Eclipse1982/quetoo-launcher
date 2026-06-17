@@ -23,6 +23,9 @@ pub struct Config {
     pub favorites: Vec<String>,
     #[serde(default)]
     pub channel: Channel,
+    /// True once the first-run onboarding has been completed (or skipped).
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 impl Config {
@@ -109,6 +112,7 @@ mod tests {
             bundle_installed: true,
             favorites: vec![],
             channel: Channel::Stable,
+            onboarded: false,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -200,6 +204,7 @@ mod tests {
             bundle_installed: false,
             favorites: vec!["1.2.3.4:1998".to_string()],
             channel: Channel::Stable,
+            onboarded: false,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -237,6 +242,7 @@ mod tests {
             bundle_installed: false,
             favorites: vec![],
             channel: Channel::PreRelease,
+            onboarded: false,
         };
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();

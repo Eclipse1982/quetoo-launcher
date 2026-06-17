@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ask, open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
-import type { Channel, InstallProgress, ServerList, Settings, Status, SyncSummary } from './types';
+import type { Channel, InstallProgress, ServerList, Settings, SkinInfo, Status, SyncSummary } from './types';
 
 export const getStatus = () => invoke<Status>('get_status');
 export const setInstallDir = (dir: string) => invoke<void>('set_install_dir', { dir });
@@ -31,6 +31,10 @@ export function onInstallProgress(
 /** Native confirmation dialog; returns true if the user accepted. */
 export const confirmDialog = (message: string, title: string) =>
   ask(message, { title, kind: 'warning' });
+
+export const readDataImage = (rel: string) => invoke<string>('read_data_image', { rel });
+export const listSkins = () => invoke<SkinInfo[]>('list_skins');
+export const setOnboarded = () => invoke<void>('set_onboarded');
 
 export const getQuetooSettings = () => invoke<Settings>('get_quetoo_settings');
 export const saveQuetooSettings = (settings: Settings) =>

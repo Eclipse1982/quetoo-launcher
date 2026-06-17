@@ -1,3 +1,4 @@
+mod assets;
 mod browser;
 mod config;
 mod data;
@@ -44,6 +45,7 @@ struct StatusDto {
     can_rollback: bool,
     channel: Channel,
     pre_release_available: bool,
+    onboarded: bool,
 }
 
 /// Render a state's version identities for display (snapshot timestamps become
@@ -93,6 +95,7 @@ async fn get_status(app: AppHandle) -> std::result::Result<StatusDto, error::Lau
         can_rollback,
         channel,
         pre_release_available: snapshot_available(os, arch),
+        onboarded: cfg.onboarded,
     })
 }
 
@@ -336,6 +339,42 @@ async fn sync_data(
     };
     let client = http_client();
     data::run_sync(&app, &client, &install_dir, verify).await
+}
+
+/// Read a game-data PNG (crosshair, skin icon, …) as a base64 data URL for the UI.
+#[tauri::command]
+async fn read_data_image(
+    app: AppHandle,
+    rel: String,
+) -> std::result::Result<String, error::LauncherError> {
+    let cfg = Config::load(&config_path(&app)?)?;
+    let dir = cfg
+        .install_dir
+        .ok_or_else(|| error::LauncherError::Config("no install directory set".into()))?;
+    assets::read_data_image(&dir, &rel)
+}
+
+/// List the installed player model/skin combinations with preview icons.
+/// Returns an empty list when nothing is installed yet.
+#[tauri::command]
+async fn list_skins(
+    app: AppHandle,
+) -> std::result::Result<Vec<assets::SkinInfo>, error::LauncherError> {
+    let cfg = Config::load(&config_path(&app)?)?;
+    match cfg.install_dir {
+        Some(dir) => assets::list_skins(&dir),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Mark first-run onboarding complete so it isn't shown again.
+#[tauri::command]
+async fn set_onboarded(app: AppHandle) -> std::result::Result<(), error::LauncherError> {
+    let path = config_path(&app)?;
+    let mut cfg = Config::load(&path)?;
+    cfg.onboarded = true;
+    cfg.save(&path)?;
+    Ok(())
 }
 
 /// Restore the previous version from the pre-update snapshot.
@@ -615,6 +654,9 @@ pub fn run() {
             set_channel,
             install_or_update,
             sync_data,
+            read_data_image,
+            list_skins,
+            set_onboarded,
             rollback_update,
             reinstall,
             uninstall,
