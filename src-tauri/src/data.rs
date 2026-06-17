@@ -231,6 +231,40 @@ pub fn prune_set(index: &DataIndex, manifest: &[ManifestEntry]) -> Vec<String> {
     out
 }
 
+/// Write `share/default/manifest.mf` in the engine's `hash size path` format,
+/// listing every manifest file present locally at the correct hash. Quetoo's
+/// built-in installer reads this on launch to decide what to download; keeping
+/// it current stops the engine re-downloading data the launcher already synced.
+fn write_engine_manifest(
+    install_dir: &Path,
+    manifest: &[ManifestEntry],
+    index: &DataIndex,
+) -> Result<()> {
+    let mut lines: Vec<String> = manifest
+        .iter()
+        .filter(|e| {
+            index
+                .files
+                .get(&e.path)
+                .map(|ix| ix.md5.eq_ignore_ascii_case(&e.md5) && ix.size == e.size)
+                .unwrap_or(false)
+        })
+        .map(|e| format!("{} {} {}", e.md5, e.size, e.path))
+        .collect();
+    lines.sort();
+    let mut body = lines.join("\n");
+    body.push('\n');
+
+    let path = local_path(install_dir, "manifest.mf");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("mf.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 /// Result of a sync run, reported to the UI.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -500,6 +534,9 @@ pub async fn run_sync(
     }
 
     index.save(&index_path)?;
+    // Write the engine-format manifest so Quetoo's built-in installer sees the
+    // synced data as current and doesn't re-download it on launch.
+    let _ = write_engine_manifest(install_dir, &manifest, &index);
     installer::emit_progress(app, "data", 100, "Game data up to date".into());
 
     Ok(SyncSummary {
@@ -777,5 +814,24 @@ mod tests {
             path: "a.png".into(),
         }];
         assert!(prune_set(&index, &manifest).is_empty());
+    }
+
+    #[test]
+    fn write_engine_manifest_lists_present_files_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path();
+        let manifest = vec![
+            ManifestEntry { md5: "bb".into(), size: 2, path: "b.png".into() },
+            ManifestEntry { md5: "aa".into(), size: 1, path: "a.png".into() },
+            ManifestEntry { md5: "cc".into(), size: 3, path: "missing.png".into() },
+        ];
+        let mut index = DataIndex::default();
+        index.files.insert("a.png".into(), IndexEntry { md5: "aa".into(), size: 1, mtime: 0 });
+        index.files.insert("b.png".into(), IndexEntry { md5: "bb".into(), size: 2, mtime: 0 });
+        // missing.png is in the manifest but not the index → excluded.
+        write_engine_manifest(install, &manifest, &index).unwrap();
+        let mf = std::fs::read_to_string(local_path(install, "manifest.mf")).unwrap();
+        // Sorted by path, engine `hash size path` format, missing.png omitted.
+        assert_eq!(mf, "aa 1 a.png\nbb 2 b.png\n");
     }
 }
