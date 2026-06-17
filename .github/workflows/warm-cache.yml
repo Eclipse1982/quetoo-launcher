@@ -1,0 +1,61 @@
+name: warm-cache
+
+# Warms the shared Rust build cache on every push to main. The tag-triggered
+# `release` workflow restores it (tag runs can read the default branch's caches),
+# so releases compile in ~2-3 min instead of cold (~7 min). Build-only: uses no
+# secrets and produces no artifacts.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: warm-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          - platform: macos-latest
+          - platform: ubuntu-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: release
+
+      - run: npm ci
+
+      # Build the frontend so `generate_context!` can embed ../dist and the
+      # cargo build below succeeds (a failed build wouldn't save the cache).
+      - run: npm run build
+
+      - name: Warm Rust cache (compile dependencies)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            cargo build --release --target aarch64-apple-darwin --target x86_64-apple-darwin
+          else
+            cargo build --release
+          fi

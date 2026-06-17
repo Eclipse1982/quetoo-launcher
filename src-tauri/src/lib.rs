@@ -600,6 +600,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Show the launcher version in the window title (always matches the
+            // built version via package info, so it can't drift).
+            let version = app.package_info().version.to_string();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&format!("Quetoo Launcher v{version}"));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             set_install_dir,
