@@ -178,6 +178,7 @@ mod tests {
             bundle_installed: true,
             favorites: vec![],
             channel: Channel::Stable,
+            onboarded: false,
         }
     }
 
@@ -319,6 +320,7 @@ mod tests {
             bundle_installed: false,
             favorites: vec![],
             channel: Channel::Stable,
+            onboarded: false,
         };
         assert_eq!(determine_state(&cfg, "v1.0.25"), InstallState::NotInstalled);
     }

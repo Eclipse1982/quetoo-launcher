@@ -2649,6 +2649,7 @@ dependencies = [
 name = "quetoo-launcher"
 version = "0.8.3"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
  "futures-util",
  "md5",
