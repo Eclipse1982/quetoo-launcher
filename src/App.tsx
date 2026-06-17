@@ -81,6 +81,15 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    // Block the browser context menu app-wide so users can't "Save as" / view
+    // source / inspect. Settings bind-capture listens on mousedown, which still
+    // fires on right-click, so rebinding to a mouse button keeps working.
+    const block = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener('contextmenu', block);
+    return () => window.removeEventListener('contextmenu', block);
+  }, []);
+
   async function run(op: () => Promise<void>, startMessage: string) {
     setPhase('working');
     setPercent(0);
