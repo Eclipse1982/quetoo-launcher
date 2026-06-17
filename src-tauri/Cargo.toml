@@ -37,3 +37,10 @@ md5 = "0.7"
 [dev-dependencies]
 tempfile = "3"
 
+# A launcher is a thin UI shell — runtime micro-performance is irrelevant, so we
+# trade some optimization for much faster CI compiles.
+[profile.release]
+opt-level = 1
+codegen-units = 256
+strip = true
+
