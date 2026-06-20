@@ -97,8 +97,57 @@ pub(crate) fn is_unsafe_rel_path(rel: &str) -> bool {
     }
 }
 
-/// Stream-download `asset` to `dest`, emitting download progress.
+/// Download `asset` to `dest`, emitting download progress.
+///
+/// Large assets are fetched as concurrent HTTP Range segments (see
+/// `crate::download`) when the origin supports them; any failure — or a small
+/// asset, or a non-range-capable origin — transparently falls back to a single
+/// serial stream, so behavior is never worse than the serial path alone.
 pub async fn download_asset(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    asset: &Asset,
+    dest: &Path,
+) -> Result<()> {
+    if let Some(segments) = crate::download::parallel_plan(asset.size) {
+        if crate::download::supports_range(client, &asset.browser_download_url).await {
+            let app2 = app.clone();
+            let progress = move |done: u64, total: u64| {
+                emit_progress(
+                    &app2,
+                    "download",
+                    percent(done, total),
+                    format!(
+                        "{:.1} MB / {:.1} MB",
+                        done as f64 / 1_048_576.0,
+                        total as f64 / 1_048_576.0
+                    ),
+                );
+            };
+            if crate::download::fetch_parallel(
+                client,
+                &asset.browser_download_url,
+                dest,
+                &segments,
+                progress,
+            )
+            .await
+            .is_ok()
+            {
+                // Mirror the serial path's closing 100% emit.
+                let mb = asset.size as f64 / 1_048_576.0;
+                emit_progress(app, "download", 100, format!("{mb:.1} MB / {mb:.1} MB"));
+                return Ok(());
+            }
+            // Parallel attempt failed — fall through to the reliable serial path.
+        }
+    }
+    download_serial(app, client, asset, dest).await
+}
+
+/// Stream-download `asset` to `dest` as a single sequential response, emitting
+/// download progress. The reliable fallback used by `download_asset`.
+async fn download_serial(
     app: &AppHandle,
     client: &reqwest::Client,
     asset: &Asset,

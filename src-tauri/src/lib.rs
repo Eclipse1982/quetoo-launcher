@@ -2,6 +2,7 @@ mod assets;
 mod browser;
 mod config;
 mod data;
+mod download;
 mod error;
 mod github;
 mod installer;
